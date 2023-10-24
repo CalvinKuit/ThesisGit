@@ -18,8 +18,7 @@ pacman::p_load(tidyverse, lubridate, tidytext,
                udpipe, car, stats, sentimentr, lexicon, 
                textdata, tokenizers, zoo, patchwork, ggforce, scales,
                vader, parallel, furrr, ggrain)
-library(cld2)
-library(purrr)
+
 ```
 
 ############## Section 1: Loading and filtering data ############## 
@@ -421,22 +420,6 @@ data_combined %>%
 write_csv(data_combined, "data_clean/data_combined_posts_comments_clean.csv")
 ```
 
-#own code
-```{r}
-# Assuming you've already loaded the necessary libraries and have your data loaded into data_combined
-
-# Filter the data to get usernames containing "bot" in their name
-filtered_data <- data_combined %>% 
-  filter(str_detect(author, "bot", ignore.case = TRUE)) %>%  # Using ignore.case to match "bot" case-insensitively
-  distinct(author)
-
-# Extract the usernames and store them in a vector
-bot_usernames <- filtered_data %>% 
-  pull(author)
-
-# bot_usernames is now a vector containing the usernames with "bot" in their name
-
-```
 
 
 
