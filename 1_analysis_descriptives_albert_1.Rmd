@@ -1,0 +1,445 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr, ggrain)
+library(cld2)
+library(purrr)
+```
+
+############## Section 1: Loading and filtering data ############## 
+
+```{r}
+data_combined<- read_csv("data_clean/nosurf_combined_posts_comments.csv", show_col_types = FALSE)
+
+data_combined <- data_combined %>% select(-`...1`)
+data_combined$text_ID <- seq.int(nrow(data_combined))
+
+data_combined <- data_combined %>% 
+  mutate(is_post = ifelse(post_id == id, TRUE, FALSE))
+```
+
+```{r}
+data_combined <- data_combined %>% 
+  mutate(year = year(date)) %>% 
+  filter(year > 2018 & year < 2022)
+```
+
+
+############## Section 3: Initial cleaning of the dataset ############## 
+
+Identify bots and spam accounts
+
+Many bots include "bot" as part of their name, but there will also be many legitimate accounts that include bot so we'll need to inspect this manually
+
+```{r}
+data_combined %>% 
+  filter(str_detect(author, "bot") | str_detect(author, "Bot") | str_detect(author, "BOT")) %>% 
+  distinct(author)
+```
+
+#Getting comments with the word, 'bot' in it
+```{r}
+data_combined %>% 
+  filter(str_detect(body, "\\bbot\\b") | str_detect(body, "\\bBot\\b") | str_detect(body, "\\bBOT\\b")) %>% 
+distinct(body, .keep_all = TRUE)
+```
+
+
+```{r}
+data_combined %>%
+  mutate(author = tolower(author)) %>%  # Convert author names to lowercase for case-insensitive matching
+  filter(str_detect(body, "bot")) %>%
+  distinct(author, .keep_all = TRUE)
+
+```
+
+```{r}
+remove <- c("imguralbumbot", "multiplevideosbot", "dadjokes_bot", "converter-bot", "annoying_DAD_bot", 
+            "kzreminderbot", "smile-bot-2019", "imdad_bot", "dadbot_2", "remindditbot", "hotlinehelpbot",
+            "bot-killer-001", "useles-converter-bot", "wikipedia_answer_bot", "ectbot", "alphabet_order_bot", "Chuck_Norris_Jokebot",
+            "dadbot_3000", "sub_doesnt_exist_bot", "xkcd-Hyphen-bot", "the_timezone_bot", "haikusbot", "Pi-info-Cool-bot", 
+            "mombot_3000", "backtickbot", "couldshouldwouldbot", "dance_bot", "resavr_bot", "nice-scores", "Shakespeare-Bot", "CommonMisspellingBot", "CoolDownBot", 
+            "FuckCoolDownBot2", "Grammar-Bot-Elite", "Fantastic-Fig9992", "RepostSleuthBot", "NoGenericBot", "WikiMobileLinkBot",
+            "NoGoogleAMPBot", "FatFingerHelperBot", "IamYodaBot", "unyoda-bot", "Generic_Reddit_Bot", "EmojifierBot", "FakespotAnalysisBot", "ShitPissCum1312", "wikipedia_text_bot", "timee_bot", "AntiObnoxiousBot", "Reddit-Book-Bot", "RossGellerBot", "LinkifyBot", "LimbRetrieval-Bot",
+            "FuckThisShitBot41", "AmazonPriceBot", "SmileBot-2020", "TitleLinkHelperBot", "SuicideAwarenessBot", "HelperBot_",
+            "I-Am-Dad-Bot", "HappyFriendlyBot", "the-worst-bot-sucks", "Anti-The-Worst-Bot", "The-Worst-Bot", "BadDadBot", "YoMommaJokeBot",
+            "CakeDay--Bot", "WikiTextBot", "BigLebowskiBot", "TheDroidNextDoor", "B0tRank", "BooBCMB", "BooBCMBSucks", 
+            "DanelRahmani", "drehmsm", "EmotionalField", "emsiem22", "mooswolvi", "Sickofmyhometown", "totesmessenger", "SFF_Robot", "auto-xkcd37", "ArweaveThis", "Mentioned_Videos", "Zoruda")
+```
+
+```{r}
+bot_mentions <- c()
+```
+
+#count the amount of bot users that will be removed as well as the amount of records removed related to bot users
+```{r}
+bot_comment_count <- table(data_combined$author[data_combined$author %in% remove])
+print(bot_comment_count)
+
+bot_comment_count <- sum(data_combined$author %in% remove)
+print(paste("Number of bot comments removed:", bot_comment_count))
+
+# Number of usernames in the vector
+num_usernames <- length(remove)
+print(paste("Number of bot accounts removed:", num_usernames))
+```
+
+
+```{r}
+data_combined <- data_combined %>%
+  filter(!author %in% remove) %>%
+  filter(!str_detect(body, paste(remove, collapse = "|")))
+
+
+```
+
+Identify duplicate posts/comments and decide if they are spam or not
+```{r}
+data_combined %>% 
+  group_by(body) %>% 
+  filter(n()>5) %>% 
+  arrange(author)
+```
+
+## remove posts/comments that are spammed (20+ of the same post)
+```{r}
+spam_posts <- c("Wow! I forgot this post and it gathered a lot of replies. I will read all of them and thanks to everyone who posted! Somehow my reddit app didn't give notifications so I assumed it got lost to the bit-universe with no replies. Yesterday I had a powerful psychedelic which made me even more committed to limiting my internet use.  I know the work is still undone but I will gather the info here and start my journey. :)",
+  "Easier said than done.",
+  "For Youtube, [Remove Youtube Suggestions](https://chrome.google.com/webstore/detail/remove-youtube-suggestion/cdhdichomdnlaadbndgmagohccgpejae?hl=en) is an extension I wrote and use that gives the option to block the feed as well as comments. It also hides other suggested videos on the side bar and at the end of videos.",
+  
+  'First, make your phone a ["dumb smartphone"](https://imgur.com/KjDvdqG)\n\nUnplug your laptop or monitor, walk with it, all the way down to the other side of the house, and leave it there. Only get it during specified hours. It’s a physical ritual.\n\nTrain your habitual musculature to do real-world activities. Improvements open doors to secondary and tertiary improvements in mental health.\n\n**Aggregators:**\n\nThe internet should be used is passively with aggregators, not actively with feeds. Feeds offer a false sense of informedness. If you scroll thru junk all day, you\'re as good as Amish; you\'re not utilizing the internet. Content should be delivered in daily batches. Even Twitter and Pinterest can be aggregators if checked once-a-day with a 10-minute time-limit. **Aggregators and time-limits give you the confidence that you’ve seen what you were meant to discover for the day.** Use YouTube Subscriptions as a news/culture aggregator. Use Chrome Extensions: "Block the YouTube Feed" &amp; "Hide YouTube Comments," &amp; use ad block and dark theme. When done, put your device in another room.\n\n**A Tactile Sense of Organization:**\n\nI think everyone should have two computer setups: a TV lounge and a work desk.\n\n**🖵** [The TV Lounge](https://imgur.com/1isaJLn) is only for streaming media. It uses a Logitech K600 keyboard. Logitech can set shortcut keys to URLs, making you one button from your media &amp; music library. Print labels on sticker paper. This bypasses all predatory “feeds” and distractions with a tactile, always-visible button. It beats smartTV interfaces which are slow and full of ads and feeds. &amp; above all, media is physically separated from your upright and focused activities.\n\n**🖵** [The Work Desk](https://imgur.com/OG5JShi) is only for **time-limited,** upright, focused work. Includes Reddit, Pinterest, researching, and shopping. Anything that can be treated with the energy of a research project. Use LeechBlock (includes time limits). I set all my blocked pages to redirect to [https://isitchristmas.com/](https://isitchristmas.com/) because it looks good with a dark mode extension. Always use the full time limit in one sitting. Do not sprinkle a 10-minute time limit over hours of mindless surfing. Your goal with LeechBlock is to remove all feeds. I like a closet-desk setup because you can physically close it away.\n\nPaste in LeechBlock options box: (The third line lets you read Reddit comment pages found in google search results)\n\nreddit.com\n\n\\+reddit.com/message/\n\n\\+reddit.com/r/\\*/comments\n\n\\+reddit.com/[r/nosurf](https://www.reddit.com/r/nosurf/)', 
+  'No matter your issue, physically stowing the laptop or mouse far away &amp; out of sight, for half the day, will teach your body new habits in the physical world.\n\n&amp; use your phone exclusively for phone, text, music, maps. Delete the apps, put the rest in a folder, and use grayscale)\n\n**Introduce new physical habits:** changing clothes, working out, nature walks, housekeeping, spa time, tea &amp; music time, guitar, painting and framing, rearranging decor, trying different lamps and return them as you learn what looks good, try new blankets, pillow cases. Be present and busy in the physical world; your mind will connect the dots.'
+  )
+
+
+
+length(spam_posts)
+```
+
+```{r}
+
+# Define your DataFrame and dup_keep vector
+# Assuming data_combined is your DataFrame and dup_keep is your vector
+
+data_combined <- data_combined %>%
+  filter(!(body %in% spam_posts)) %>%
+  filter(!(author == "samsungzing" & post_id == "bpvivf")) %>%
+  filter(!(author == "LibertyAndVirtue" & str_detect(body, 'First, make your phone a ["dumb smartphone"]') & post_id != "kg4137")) %>% 
+  filter(!(author == "LibertyAndVirtue" & str_detect(body, "Not checking till 3 has"))) %>%
+  filter(!(str_detect(body, "!remind me") | 
+           str_detect(body, "!remindme") | 
+           str_detect(body, "!RemindMe") | 
+           str_detect(body, "!Remind Me"))) %>%
+  filter(!(author == "GGSillyGoose" & str_detect(body, "Wow! I forgot this post and it gathered a lot of replies.") & id != "eq9ihf1")) %>%
+   filter(!(post_id == "kngd4q" | 
+           post_id == "kmubf7" | 
+           post_id == "klcdsj"))
+# Keep one of each duplicate from the 'dup_keep' vector
+#data_combined <- data_combined %>%
+ # distinct(dup_keep, .keep_all = TRUE)
+
+# Here, 'dup_keep' is a vector containing the duplicates you want to keep.
+
+```
+
+```{r}
+
+```
+
+############## Section 3: Initial descriptive overview of the dataset ############## 
+
+## Number of posts/submissions (overall and per year)
+
+Overall
+```{r}
+data_combined %>% 
+  group_by(is_post) %>% 
+  tally()
+```
+
+Posts by year
+```{r}
+data_combined %>% 
+  mutate(year = year(date)) %>% 
+  filter(is_post == "TRUE") %>% 
+  group_by(year) %>% 
+  tally()
+```
+Comments by year
+
+```{r}
+data_combined %>% 
+  mutate(year = year(date)) %>% 
+  filter(is_post == "FALSE") %>% 
+  group_by(year) %>% 
+  tally()
+```
+
+## Figure for posts and comments over time
+
+```{r}
+overall_figure <- data_combined %>% 
+mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  group_by(year_month) %>% 
+  tally() %>% 
+  mutate(year_month=as.Date(as.yearmon(year_month))) %>% 
+  ggplot(aes(x = year_month, y = n, group = 1))+
+  stat_summary(fun = sum, geom = "line", size=1)+
+  labs(y= "Count",
+       x = "Date",
+       title = "All interactions")+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        plot.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+
+comments_figure <- data_combined %>% 
+  filter(is_post == "FALSE") %>% 
+  mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  group_by(year_month) %>% 
+  tally() %>% 
+  mutate(year_month=as.Date(as.yearmon(year_month))) %>% 
+  ggplot(aes(x = year_month, y = n, group = 1))+
+  stat_summary(fun = sum, geom = "line", size=1)+
+  labs(y= "Count",
+       title = "Comments")+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+
+posts_figure <- data_combined %>% 
+  filter(is_post == "TRUE") %>% 
+  mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  group_by(year_month) %>% 
+  tally() %>% 
+  mutate(year_month=as.Date(as.yearmon(year_month))) %>% 
+  ggplot(aes(x = year_month, y = n, group = 1))+
+  stat_summary(fun = sum, geom = "line", size=1)+
+  labs(y= "Count",
+       x = "Date",
+       title = "Posts")+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        plot.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+
+combined_figure <- overall_figure + (comments_figure / posts_figure) + 
+  plot_annotation(title = "r/nosurf Interactions over time",
+                                  subtitle = "Aggregated by month") & 
+  theme(plot.title = element_text(face = "bold", size = 18),
+        plot.subtitle = element_text(face = "bold", size = 14))
+
+combined_figure
+
+rm(overall_figure, posts_figure, comments_figure)
+```
+
+## Report the typical length of posts and comments
+Words: mean, median, sd, min, max
+
+```{r}
+data_combined %>% 
+  unnest_tokens(word, body) %>%
+  group_by(id) %>% 
+  tally() %>%
+  ungroup() %>% 
+  left_join(data_combined, by="id") %>% 
+  group_by(is_post) %>% #comment out to get overall
+  summarise(mean = mean(n),
+            median = median(n),
+            sd = sd(n),
+            min = min(n),
+            max = max(n))
+```
+
+```{r}
+data_combined %>% 
+  unnest_tokens(word, body) %>%
+  group_by(id) %>% 
+  tally() %>%
+  ungroup() %>% 
+  left_join(data_combined, by="id") %>% 
+  mutate(is_post = ifelse(is_post == TRUE, "Post", "Comment")) %>% 
+  ggplot(aes(is_post, y = n, fill = is_post, color = is_post)) + 
+  geom_rain(alpha = .3, 
+            boxplot.args.pos = list(
+              color = "black", 
+              width = 0.05, 
+              position = position_nudge(x = 0.13)),
+            violin.args.pos = list(
+              side = "r",
+              color = "black", 
+              width = 0.7, 
+              position = position_nudge(x = 0.2))) +
+  scale_fill_brewer(palette = 'Dark2')+
+  scale_color_brewer(palette = 'Dark2')+
+  coord_flip()+
+  labs(y = "Character count", 
+       x = "", # x = "Interaction type",
+       title = "Summary of the length of interactions on r/nosurf")+
+  guides(fill = 'none', color = 'none')+
+  theme_classic() +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+```
+
+Take-aways:
+1. Posts tend to be longer than comments
+2. Note that there are some very short posts/comments. Plan that these be removed when cleaning for sentiment analysis and topic modelling later.
+
+
+## Number of accounts contributing per year (growth?)
+
+Combined posts and comments
+```{r}
+data_combined %>% 
+  group_by(year) %>% 
+  summarise(distinct_authors = n_distinct(author))
+```
+
+Posts
+```{r}
+data_combined %>% 
+  filter(is_post == "TRUE") %>% 
+  group_by(year) %>% 
+  summarise(distinct_authors = n_distinct(author))
+```
+
+Comments
+```{r}
+data_combined %>% 
+  filter(is_post == "FALSE") %>% 
+  group_by(year) %>% 
+  summarise(distinct_authors = n_distinct(author))
+```
+
+
+## Average number of posts and comments per author
+
+Combined posts and comments
+```{r}
+data_combined %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  summarise(mean = mean(n),
+            median = median(n),
+            sd = sd(n),
+            min = min(n),
+            max = max(n))
+```
+
+Posts
+```{r}
+data_combined %>% 
+  filter(is_post == "TRUE") %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  summarise(mean = mean(n),
+            median = median(n),
+            sd = sd(n),
+            min = min(n),
+            max = max(n))
+```
+
+How many posted more than 10 times per year?
+```{r}
+data_combined %>% 
+  filter(is_post == "TRUE") %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  filter(n > 10)
+```
+
+Number of posts accounted for by these people
+```{r}
+data_combined %>% 
+  filter(is_post == "TRUE") %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  filter(n > 10) %>% 
+  summarise(sum = sum(n))
+```
+
+
+Comments
+```{r}
+data_combined %>% 
+  filter(is_post == "FALSE") %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  summarise(mean = mean(n),
+            median = median(n),
+            sd = sd(n),
+            min = min(n),
+            max = max(n))
+```
+
+Who commented a lot?
+
+```{r}
+data_combined %>% 
+  filter(is_post == "FALSE") %>% 
+  group_by(year, author) %>% 
+  tally() %>% 
+  filter(n > 50)
+```
+
+
+# Export data set for the next stage of the analysis
+```{r}
+write_csv(data_combined, "data_clean/data_combined_posts_comments_clean.csv")
+```
+
+#own code
+```{r}
+# Assuming you've already loaded the necessary libraries and have your data loaded into data_combined
+
+# Filter the data to get usernames containing "bot" in their name
+filtered_data <- data_combined %>% 
+  filter(str_detect(author, "bot", ignore.case = TRUE)) %>%  # Using ignore.case to match "bot" case-insensitively
+  distinct(author)
+
+# Extract the usernames and store them in a vector
+bot_usernames <- filtered_data %>% 
+  pull(author)
+
+# bot_usernames is now a vector containing the usernames with "bot" in their name
+
+```
+
+
+
+
+
+
