@@ -1,0 +1,64 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr, lexicon)
+```
+
+# read in sentimentr
+
+```{r}
+data_sentimentr<- read_csv("data_clean/data_with_sentimentr.csv", show_col_types = FALSE)
+data_sentimentr
+```
+
+## clean up
+```{r}
+data_sentimentr <- data_sentimentr %>% select(-`...1`)
+```
+
+
+# read in VADER
+
+```{r}
+data_vader<- read_csv("data_clean/data_with_sentiment_vader.csv", show_col_types = FALSE)
+data_vader
+```
+
+## clean up
+```{r}
+data_vader <- data_vader %>% select(-`...1`)
+```
+
+
+# Combine datasets
+
+```{r}
+combined_sentiment <- data_sentimentr %>% 
+  left_join(data_vader, by = "id") %>% 
+  select(-text)
+
+combined_sentiment
+```
+
+# export combined dataset
+```{r}
+write.csv(combined_sentiment, "data_clean/data_combined_sentiment")
+```
+
+

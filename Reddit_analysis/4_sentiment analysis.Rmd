@@ -1,0 +1,142 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr, lexicon)
+```
+
+```{r}
+data_for_sentiment<- read_csv("data_clean/data_for_sentiment_analysis.csv", show_col_types = FALSE)
+data_for_sentiment
+```
+
+### Sentiment analysis
+
+Tokenise into sentences and perform sentiment analysis, and aggregate to the article level (by ID).
+(see page 46 and 47 of https://cran.r-project.org/web/packages/sentimentr/sentimentr.pdf for more details)
+
+- Uses the Jockers-Rinker lexicon from the lexicon package (there are other options to consider but this is good).
+- Uses the valence shifters dictionary from the lexicon package.
+- Uses an amplifier weight of 2 (the default is 0.8). This value will multiply the polarized terms by 1 + this value. Sentiment tends to converge around neutral sentiment when aggregated.
+- The window for valence shifters is set to 3 before and 3 after a word.
+- The question weight is set to 0. It ranges from 0 to 1. Default is 1. A 0 corresponds with the belief that questions (pure questions) are not polarized. 
+- Adversative weight was retained at the default and not downweighted. An adversative conjunction overrules the previous clause containing a polarized word (e.g., “I like it but it’s not worth it.”
+- Set to detect the neutral non-verb word like.
+
+note the above decisions (see Cornelissen et al. for a similar write up)
+
+hash_nrc_emotions
+hash_sentiment_jockers_rinker
+
+When using sentimentr, you can use replace_emoticon to change the emoticons into word equivalents. Check all the documentation that is available in the textclean package. This is installed when you installed sentimentr. –
+
+```{r}
+start_time <- Sys.time()
+
+comments_with_sentiment <- data_for_sentiment %>%
+  sentimentr::get_sentences(body) %>% 
+  sentimentr::sentiment_by(.$text_ID, 
+               polarity_dt = lexicon::hash_sentiment_jockers_rinker,
+               valence_shifters_dt = lexicon::hash_valence_shifters,
+               amplifier.weight = 2,
+               n.before = 3, n.after = 3,
+               question.weight = 0,
+               neutral.nonverb.like = TRUE)
+
+comments_with_sentiment
+
+end_time <- Sys.time()
+
+total_time = end_time - start_time
+total_time # this takes about 3-4 mins to run
+```
+
+### Bring back the rest of the data
+
+```{r}
+data_with_sentiment <- comments_with_sentiment %>% 
+  left_join(data_for_sentiment, by = c("by" = "text_ID")) %>% 
+  rename(text_ID = by)
+
+data_with_sentiment
+
+rm(comments_with_sentiment, data_for_sentiment)
+gc() #force garbage collection
+```
+
+
+
+Visualise sentiment distribution
+
+# VADER as an alternative
+
+```{r}
+data_for_sentiment<- read_csv("data_clean/data_for_sentiment_analysis.csv", show_col_types = FALSE)
+data_for_sentiment
+```
+
+# run vader using parallelisation
+
+```{r}
+num_cores = detectCores() #I have 8 cores available (this will differ on other machines)
+
+start_time <- Sys.time()
+plan(multisession, workers = num_cores-2) #use 2 less cores than the max on the machine
+
+data_vader_sentiment <- data_for_sentiment %>% 
+  split(data_for_sentiment$id) %>% 
+  future_map(~vader_df(.$body)) #this produces a number or warnings
+
+end_time <- Sys.time()
+
+total_time = end_time - start_time
+total_time # this takes about 30 mins to run as it is parallelised (otherwise, it takes about 2 hours)
+     
+plan(multisession, workers = 1)
+```
+
+```{r}
+df_vader_sentiment <- as.data.frame(do.call(rbind, data_vader_sentiment))
+df_vader_sentiment <- cbind(rownames(df_vader_sentiment), data.frame(df_vader_sentiment, row.names=NULL))
+
+df_vader_sentiment <- df_vader_sentiment %>% 
+  rename(id = `rownames(df_vader_sentiment)`)
+
+df_vader_sentiment
+```
+
+```{r}
+df_vader_sentiment <- df_vader_sentiment %>% 
+  filter(!word_scores == "ERROR")
+```
+
+```{r}
+df_vader_sentiment_all_data <- df_vader_sentiment %>% 
+  left_join(data_for_sentiment, by ="id")
+```
+
+describe and visualise
+
+```{r}
+write.csv(df_vader_sentiment, "data_clean/data_with_sentiment_vader.csv")
+```
+
+```{r}
+
+```
+

@@ -1,0 +1,69 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr)
+```
+
+```{r}
+data_combined<- read_csv("data_clean/data_combined_posts_comments_clean.csv", show_col_types = FALSE)
+data_combined
+```
+
+############## Section 1: Sentiment Analysis ############## 
+
+Sentiment analysis is performed using the `sentimentr` package. 
+This package analyses sentiment at a sentence level rather than a word level. 
+The analysis also incorporates valence shifters.
+        
+## tokenise for cleaning
+
+Identifying posts/comments that are less than six words long to be removed later
+```{r}
+too_short <- data_combined %>% 
+  unnest_tokens(word, body) %>%
+  group_by(id) %>% 
+  tally() %>%
+  filter(n<6) %>% 
+  select(id)
+
+too_short
+```
+
+Note how many have been flagged for removal and what the new sample is for analysis
+
+```{r}
+data_for_sentiment <- data_combined %>% 
+  filter(!id %in% too_short$id)
+
+rm(too_short)
+```
+
+Any other initial cleaning?
+- more will come with VADER and sentimentr
+
+#Export dataset for sentiment analysis
+```{r}
+write_csv(data_for_sentiment, "data_clean/data_for_sentiment_analysis.csv")
+```
+
+
+
+
+
+

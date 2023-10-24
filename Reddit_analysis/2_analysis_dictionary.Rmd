@@ -1,0 +1,713 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup initial
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr, ggrain)
+```
+
+############## Section 1: Loading and filtering data ############## 
+
+```{r echo=FALSE}
+data_combined<- read_csv("data_clean/data_combined_posts_comments_clean.csv", show_col_types = FALSE)
+data_combined
+```
+
+# Platform Analysis (WideSpread)
+
+
+```{r echo=FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+
+# Load the dataset
+data_combined <- read_csv("data_clean/data_combined_posts_comments_clean.csv", show_col_types = FALSE)
+
+# Filter data by date ranges
+date_range <- data_combined %>% filter(ymd_hms(date) >= ymd("2019-01-01") & ymd_hms(date) <= ymd("2021-12-31"))
+pre_pandemic <- data_combined %>% filter(ymd_hms(date) >= ymd("2019-01-01") & ymd_hms(date) <= ymd("2020-03-31"))
+during_pandemic <- data_combined %>% filter(ymd_hms(date) >= ymd("2020-04-01") & ymd_hms(date) <= ymd("2021-12-31"))
+
+
+# Platforms
+platform_unigrams <- c("technology", "device", "innovation", "smartphone", "online", "gadget", "handset", "network", "electronic", "machine", "apparatus", "tech", "platform", "phone", "machinery", "app", "cell", "mobile", "community", "digital", "application", "media", "service", "web", "browser", "operating system", "streaming", "e-commerce", "search engine", "virtual reality", "augmented reality", "cloud", "gaming", "podcasts","television", "tv", "notifications", "smartwatch")
+
+platform_bigrams <- c("technology social", "technology", "social media", "digital media", "device", "media electronic", "innovation", "community tech", "gadget apparatus", "mobile phone", "media service", "phone handset", "online media", "social", "smartphone", "electronic media", "online", "gadget", "device platform", "online community", "smartphone technology", "streaming service", "virtual world", "e-commerce platform", "gaming console", "video conference", "operating system", "search engine", "web browser", "cloud service", "social network", "dating app", "video games", "smart watch")
+
+# Extending the 'platform_unigrams' list with popular applications/social media platforms
+social_platforms <- c("Facebook", "YouTube", "WhatsApp", "Messenger", "WeChat", "Instagram", "TikTok", "QQ", "Douyin", "Sina Weibo", "Qzone", "Snapchat", "Reddit", "Twitter", "LinkedIn", "Pinterest", "Telegram", "Viber", "Discord", "Twitch", "Baidu Tieba", "Signal", "Skype", "Zoom", "Microsoft Teams", "Slack", "Clubhouse", "Tumblr", "Spotify","Netflix", "Tinder", "Hinge", "DisneyPlus")
+
+
+# Modified function to count occurrences of terms
+count_terms <- function(data, terms, token_type = "words") {
+  if (token_type == "bigrams") {
+    tokenized_data <- data %>%
+      unnest_tokens(output = word, input = body, token = "ngrams", n = 2)
+  } else {
+    tokenized_data <- data %>%
+      unnest_tokens(output = word, input = body)
+  }
+  
+  tokenized_data %>%
+    count(word) %>%
+    filter(word %in% terms) %>%
+    arrange(-n)
+}
+
+# Count occurrences for pre-pandemic and during pandemic
+pre_pandemic_platforms <- count_terms(pre_pandemic, platform_unigrams)
+during_pandemic_platforms <- count_terms(during_pandemic, platform_unigrams)
+
+pre_pandemic_platforms_bigram <- count_terms(pre_pandemic, platform_bigrams, "bigrams")
+during_pandemic_platforms_bigram <- count_terms(during_pandemic, platform_bigrams, "bigrams")
+
+# Display top 10 platforms for each period
+head(pre_pandemic_platforms, 20)
+head(during_pandemic_platforms, 20)
+
+head(pre_pandemic_platforms_bigram, 20)
+head(during_pandemic_platforms_bigram, 20)
+
+
+```
+## comparing pre vs post covid 
+
+```{r echo=FALSE}
+# Load necessary library
+library(ggplot2)
+
+# Join the two datasets to compare side-by-side
+comparison_data <- full_join(pre_pandemic_platforms, during_pandemic_platforms, by = "word", suffix = c("_pre", "_during"))
+
+# Fill NA values with 0
+comparison_data[is.na(comparison_data)] <- 0
+
+# Melt the data for ggplot
+comparison_data_long <- comparison_data %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+# Create the plot
+covid_platforms_uni <- ggplot(comparison_data_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Platform Mentions Pre and During Pandemic", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+
+# bigrams
+
+# Join the two datasets to compare side-by-side for bigrams
+comparison_data_bigram <- full_join(pre_pandemic_platforms_bigram, during_pandemic_platforms_bigram, by = "word", suffix = c("_pre", "_during"))
+
+# Fill NA values with 0 for bigrams
+comparison_data_bigram[is.na(comparison_data_bigram)] <- 0
+
+# Melt the data for ggplot for bigrams
+comparison_data_bigram_long <- comparison_data_bigram %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+covid_platforms_uni
+# Create the plot for bigrams
+ggplot(comparison_data_bigram_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Platform Bigram Mentions Pre and During Pandemic", 
+       x = "Platform Bigrams", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+#Without the term social media for bigrams
+
+# List of social media terms to be removed from bigrams
+social_media_terms <- c("Facebook", "YouTube", "WhatsApp", "Messenger", "WeChat", "Instagram", "TikTok", "QQ", "Douyin", "Sina Weibo", "Qzone", "Snapchat", "Reddit", "Twitter", "LinkedIn", "Pinterest", "Telegram", "Viber", "Discord", "Twitch", "Baidu Tieba", "Signal", "Skype", "Zoom", "Microsoft Teams", "Slack", "Clubhouse", "Tumblr", "Spotify")
+
+# Filter out bigrams containing social media terms
+comparison_data_bigram_filtered <- comparison_data_bigram %>% 
+  filter(!str_detect(word, paste(social_media_terms, collapse = "|")))
+
+# Melt the filtered data for ggplot
+comparison_data_bigram_filtered_long <- comparison_data_bigram_filtered %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+#shrink to more relevant categories
+
+
+```
+As a percentage
+```{r}
+# Calculate total mentions for each period
+total_pre_pandemic_platforms <- sum(comparison_data$n_pre)
+total_during_pandemic_platforms <- sum(comparison_data$n_during)
+
+# Calculate percentages for unigrams
+comparison_data$percentage_pre <- (comparison_data$n_pre / total_pre_pandemic_platforms) * 100
+comparison_data$percentage_during <- (comparison_data$n_during / total_during_pandemic_platforms) * 100
+
+# Melt the data for ggplot
+comparison_data_long_percentage <- comparison_data %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Create the plot for unigrams using percentages
+covid_platforms_uni_percentage <- ggplot(comparison_data_long_percentage, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Platform Mentions Pre and During Pandemic (Percentage)", 
+       x = "Platforms", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+# Calculate total mentions for bigrams for each period
+total_pre_pandemic_platforms_bigram <- sum(comparison_data_bigram$n_pre)
+total_during_pandemic_platforms_bigram <- sum(comparison_data_bigram$n_during)
+
+# Calculate percentages for bigrams
+comparison_data_bigram$percentage_pre <- (comparison_data_bigram$n_pre / total_pre_pandemic_platforms_bigram) * 100
+comparison_data_bigram$percentage_during <- (comparison_data_bigram$n_during / total_during_pandemic_platforms_bigram) * 100
+
+# Melt the data for ggplot for bigrams
+comparison_data_bigram_long_percentage <- comparison_data_bigram %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Create the plot for bigrams using percentages
+covid_platforms_bi_percentage <- ggplot(comparison_data_bigram_long_percentage, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Platform Bigram Mentions Pre and During Pandemic (Percentage)", 
+       x = "Platform Bigrams", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+covid_platforms_uni_percentage
+covid_platforms_bi_percentage
+
+```
+
+## Platform Totals
+
+```{r echo=FALSE}
+# Count occurrences for date_range
+date_range_platforms <- count_terms(date_range, platform_unigrams)
+date_range_platforms_bigram <- count_terms(date_range, platform_bigrams, "bigrams")
+
+
+library(RColorBrewer)
+# Create the plot for unigrams
+platform_total <- ggplot(date_range_platforms, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Platform Totals for Unigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+
+# Create the plot for bigrams
+platform_total_bi <- ggplot(date_range_platforms_bigram, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Platform Totals for Bigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+head(date_range_platforms,10)
+head(date_range_platforms_bigram,10)
+
+platform_total
+platform_total_bi
+```
+as persentages
+```{r}
+# Calculate total number of platform mentions for the date range
+total_platforms_date_range <- sum(date_range_platforms$n)
+
+# Calculate percentages for unigrams
+date_range_platforms$percentage <- (date_range_platforms$n / total_platforms_date_range) * 100
+
+# Calculate total number of platform bigram mentions for the date range
+total_platforms_date_range_bigram <- sum(date_range_platforms_bigram$n)
+
+# Calculate percentages for bigrams
+date_range_platforms_bigram$percentage <- (date_range_platforms_bigram$n / total_platforms_date_range_bigram) * 100
+
+# Create the plot for unigrams with percentages
+platform_total_percentage <- ggplot(date_range_platforms, aes(x = reorder(word, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Platform Totals for Unigrams (Percentage)", 
+       x = "Platforms", y = "Percentage of Mentions") +
+  theme_minimal() + coord_flip()
+
+# Create the plot for bigrams with percentages
+platform_total_bi_percentage <- ggplot(date_range_platforms_bigram, aes(x = reorder(word, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Platform Totals for Bigrams (Percentage)", 
+       x = "Platforms", y = "Percentage of Mentions") +
+  theme_minimal() + coord_flip()
+
+# Display top platform mentions for each type
+head(date_range_platforms,10)
+head(date_range_platforms_bigram,10)
+
+platform_total_percentage
+platform_total_bi_percentage
+
+```
+
+
+
+
+# Social Media Platforms
+
+```{r echo=FALSE}
+# Create a function to count mentions in the pre-pandemic and during-pandemic periods
+count_mentions <- function(data, term) {
+  pre_pandemic_count <- sum(str_detect(tolower(data$body[data$date >= as.Date("2019-01-01") & data$date <= as.Date("2020-03-31")]), paste0("\\b", tolower(term), "\\b")))
+  during_pandemic_count <- sum(str_detect(tolower(data$body[data$date >= as.Date("2020-04-01") & data$date <= as.Date("2021-12-31")]), paste0("\\b", tolower(term), "\\b")))
+  return(data.frame(Term = term, Pre_Pandemic = pre_pandemic_count, During_Pandemic = during_pandemic_count))
+}
+
+# Get mentions for each platform
+platform_mentions <- lapply(social_platforms, function(platform) {
+  count_mentions(data_combined, platform)
+})
+
+# Bind the data frames in the list to a single data frame
+platform_mentions_df <- do.call(rbind, platform_mentions)
+
+# Add a column for total mentions and sort
+platform_mentions_df$Total_Mentions <- platform_mentions_df$Pre_Pandemic + platform_mentions_df$During_Pandemic
+platform_mentions_df <- platform_mentions_df[order(-platform_mentions_df$Total_Mentions), ]
+
+# Plot the data using ggplot2
+ggplot(platform_mentions_df, aes(x = reorder(Term, Total_Mentions))) +  # reordering based on Total_Mentions
+  geom_bar(aes(y = Pre_Pandemic, fill = "Pre Pandemic"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = During_Pandemic, fill = "During Pandemic"), stat = "identity", position = "dodge") +
+  labs(title = "Mentions of Social Media Platforms Pre and During Pandemic", 
+       x = "Platform", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2", name = "Period") + coord_flip()
+
+
+```
+
+```{r echo=FALSE}
+# Required libraries
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(plotly)
+library(lubridate)
+library(stringr)
+library(ggridges)
+
+# Assuming you've already loaded data_combined and set social_media_terms
+# Filter the data within the date range
+date_range <- data_combined %>% 
+  filter(ymd_hms(date) >= ymd("2019-01-01") & ymd_hms(date) <= ymd("2021-12-31"))
+
+# Define the function to calculate monthly mentions for each platform
+calculate_monthly_mentions <- function(platform, data) {
+  mentions_df <- data %>%
+    filter(str_detect(tolower(body), paste0("\\b", tolower(platform), "\\b"))) %>%
+    count(Month = floor_date(date, "month")) %>%
+    rename(mentions = n)
+  
+  mentions_df$Platform <- platform
+  
+  return(mentions_df)
+}
+
+# Apply function to each platform and combine results
+all_platform_mentions <- do.call(rbind, lapply(social_media_terms, calculate_monthly_mentions, data = date_range))
+
+# Identify top 10 platforms based on total mentions
+top_platforms <- all_platform_mentions %>%
+  group_by(Platform) %>%
+  summarize(TotalMentions = sum(mentions), .groups = 'drop') %>%
+  arrange(desc(TotalMentions)) %>%
+  head(10) %>%
+  pull(Platform)
+
+# Filter data for only the top 10 platforms
+filtered_mentions <- all_platform_mentions %>% filter(Platform %in% top_platforms)
+
+# Plot the data
+ggplot(filtered_mentions, aes(x = Month, y = mentions, color = Platform, group = Platform)) +
+  geom_line(size = 1) +
+  labs(title = "Monthly Mentions of Top 10 Platforms (2019-2021)", 
+       x = "Month", y = "Mentions", color = "Platform") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "top")
+
+ggplot(filtered_mentions, aes(x = mentions, y = Platform, fill = Platform, group = Platform)) +
+  geom_density_ridges(scale = 3) +
+  labs(title = "Distribution of Monthly Mentions of Top 10 Platforms (2019-2021)", 
+       x = "Mentions per Month", y = "Platform", fill = "Platform") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Paired") +
+  theme(legend.position = "top")
+
+
+```
+
+
+# Strategies
+
+```{r echo=FALSE}
+
+# Define strategies
+strategy_unigrams <- c("reducing", "switching", "break", "quitting", "leaving", "meditating", "unplugging", "limiting", "detoxing", "avoiding", "minimizing", "disconnecting", "resting", "sabbatical", "offlining", "restricting", "abstaining", "pausing", "refraining", "deactivating", "logging off", "ignoring", "muting", "filtering", "decluttering", "simplifying",  "rebooting", "recharging", "grounding", "backtracking", "outsourcing", "scheduling", "fading", "blocking", "committing", "retreating", "downshifting", "prioritizing", "tool")
+
+
+strategy_bigrams <- c("approach way", 'cold turkey', "disconnection programs", "solution approach", "seeking support", "practice method", "way practice", "strategy solution", "best practices", "action plan", "contingency plan", "proven method", "game plan", "Easing off", "blue light")
+
+# Count occurrences for pre-pandemic and during pandemic for strategy unigram.
+pre_pandemic_strategies <- count_terms(pre_pandemic, strategy_unigrams)
+during_pandemic_strategies <- count_terms(during_pandemic, strategy_unigrams)
+
+# Count occurrences for pre-pandemic and during pandemic for strategy bigrams
+pre_pandemic_strategies_bigram <- count_terms(pre_pandemic, strategy_bigrams, "bigrams")
+during_pandemic_strategies_bigram <- count_terms(during_pandemic, strategy_bigrams, "bigrams")
+
+# Display top strategy mentions for each period
+head(pre_pandemic_strategies, 20)
+head(during_pandemic_strategies, 20)
+head(pre_pandemic_strategies_bigram, 20)
+head(during_pandemic_strategies_bigram, 20)
+
+# Comparing pre vs post covid for strategy unigrams
+comparison_data_strategy <- full_join(pre_pandemic_strategies, during_pandemic_strategies, by = "word", suffix = c("_pre", "_during"))
+comparison_data_strategy[is.na(comparison_data_strategy)] <- 0
+comparison_data_strategy_long <- comparison_data_strategy %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+# Plot for strategy unigrams
+ggplot(comparison_data_strategy_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Strategy Mentions Pre and During Pandemic", 
+       x = "Strategies", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+# Comparing pre vs post covid for strategy bigrams
+comparison_data_strategy_bigram <- full_join(pre_pandemic_strategies_bigram, during_pandemic_strategies_bigram, by = "word", suffix = c("_pre", "_during"))
+comparison_data_strategy_bigram[is.na(comparison_data_strategy_bigram)] <- 0
+comparison_data_strategy_bigram_long <- comparison_data_strategy_bigram %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+# Plot for strategy bigrams
+ggplot(comparison_data_strategy_bigram_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Strategy Bigram Mentions Pre and During Pandemic", 
+       x = "Strategy Bigrams", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+```
+as persentages
+```{r}
+# Calculate total number of strategy mentions for each period
+total_pre_pandemic <- sum(pre_pandemic_strategies$n)
+total_during_pandemic <- sum(during_pandemic_strategies$n)
+
+# Calculate percentages for pre-pandemic and during pandemic for strategy unigram
+pre_pandemic_strategies$percentage <- (pre_pandemic_strategies$n / total_pre_pandemic) * 100
+during_pandemic_strategies$percentage <- (during_pandemic_strategies$n / total_during_pandemic) * 100
+
+# Calculate total number of strategy bigram mentions for each period
+total_pre_pandemic_bigram <- sum(pre_pandemic_strategies_bigram$n)
+total_during_pandemic_bigram <- sum(during_pandemic_strategies_bigram$n)
+
+# Calculate percentages for pre-pandemic and during pandemic for strategy bigram
+pre_pandemic_strategies_bigram$percentage <- (pre_pandemic_strategies_bigram$n / total_pre_pandemic_bigram) * 100
+during_pandemic_strategies_bigram$percentage <- (during_pandemic_strategies_bigram$n / total_during_pandemic_bigram) * 100
+
+# Comparing pre vs post covid for strategy unigrams (using percentage)
+comparison_data_strategy <- full_join(pre_pandemic_strategies, during_pandemic_strategies, by = "word", suffix = c("_pre", "_during"))
+comparison_data_strategy[is.na(comparison_data_strategy)] <- 0
+comparison_data_strategy_long <- comparison_data_strategy %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Plot for strategy unigrams using percentage
+ggplot(comparison_data_strategy_long, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Strategy Mentions Pre and During Pandemic (Percentage)", 
+       x = "Strategies", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+# Comparing pre vs post covid for strategy bigrams (using percentage)
+comparison_data_strategy_bigram <- full_join(pre_pandemic_strategies_bigram, during_pandemic_strategies_bigram, by = "word", suffix = c("_pre", "_during"))
+comparison_data_strategy_bigram[is.na(comparison_data_strategy_bigram)] <- 0
+comparison_data_strategy_bigram_long <- comparison_data_strategy_bigram %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Plot for strategy bigrams using percentage
+ggplot(comparison_data_strategy_bigram_long, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Strategy Bigram Mentions Pre and During Pandemic (Percentage)", 
+       x = "Strategy Bigrams", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+```
+
+## Stategy Totals (Supports Nassens Findings - Self imposed disconnection strategies)
+
+```{r echo=FALSE}
+date_range_strat <- count_terms(date_range, strategy_unigrams)
+date_range_strat_bigram <- count_terms(date_range, strategy_bigrams, "bigrams")
+
+# Create the plot for unigrams
+ggplot(date_range_strat, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Strategy Totals for Unigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+
+# Create the plot for bigrams
+ggplot(date_range_strat_bigram, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Strategy Totals for Bigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+# Calculate total number of words for date_range period
+total_words_date_range <- sum(date_range_strat$n)
+
+# Calculate percentages for unigrams and bigrams
+date_range_strat$percentage <- (date_range_strat$n / total_words_date_range) * 100
+date_range_strat_bigram$percentage <- (date_range_strat_bigram$n / total_words_date_range) * 100
+
+# Create the plot for unigrams with percentages
+ggplot(date_range_strat, aes(x = reorder(word, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Strategy Totals for Unigrams (Percentage)", 
+       x = "Platforms", y = "Percentage of Mentions") +
+  theme_minimal() + coord_flip()
+
+# Create the plot for bigrams with percentages
+ggplot(date_range_strat_bigram, aes(x = reorder(word, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Strategy Totals for Bigrams (Percentage)", 
+       x = "Platforms", y = "Percentage of Mentions") +
+  theme_minimal() + coord_flip()
+
+
+
+head(date_range_strat,10)
+head(date_range_strat_bigram,10)
+```
+Alternative looks
+```{r}
+# Lollipop Chart for Unigrams
+ggplot(date_range_strat, aes(x = reorder(word, n), y = n)) +
+  geom_segment(aes(xend = reorder(word, n), yend = 0), color = brewer.pal(8, "Dark2")[1]) +
+  geom_point(size = 3, color = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Strategy Totals for Unigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+# Lollipop Chart for Bigrams
+ggplot(date_range_strat_bigram, aes(x = reorder(word, n), y = n)) +
+  geom_segment(aes(xend = reorder(word, n), yend = 0), color = brewer.pal(8, "Dark2")[2]) +
+  geom_point(size = 3, color = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Strategy Totals for Bigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+```
+
+
+# Concerns/Opinions/Problems
+
+```{r echo=FALSE}
+# Define concerns
+concern_unigrams <- c("anxiety", "stress", "addiction", "overwhelm", "overuse", "dependency", "distraction", "privacy", "isolation", "compulsion", "fatigue", "insecurity", "bias", "manipulation", "misinformation", "burnout", "exploitation", "alienation", "harassment", "bullying")
+concern_bigrams <- c("information overload", "social isolation", "privacy breach", "mental fatigue", "digital addiction", "constant distraction", "data misuse", "platform bias", "screen burnout", "online harassment", "filter bubble", "echo chamber", "cyber bullying", "tech dependency", "cognitive decline", "data exploitation", "identity theft", "algorithmic bias", "invasive ads")
+
+# Count occurrences for pre-pandemic and during pandemic for concern unigrams
+pre_pandemic_concerns <- count_terms(pre_pandemic, concern_unigrams)
+during_pandemic_concerns <- count_terms(during_pandemic, concern_unigrams)
+
+# Count occurrences for pre-pandemic and during pandemic for concern bigrams
+pre_pandemic_concerns_bigram <- count_terms(pre_pandemic, concern_bigrams, "bigrams")
+during_pandemic_concerns_bigram <- count_terms(during_pandemic, concern_bigrams, "bigrams")
+
+# Display top concern mentions for each period
+head(pre_pandemic_concerns, 20)
+head(during_pandemic_concerns, 20)
+head(pre_pandemic_concerns_bigram, 20)
+head(during_pandemic_concerns_bigram, 20)
+
+# Comparing pre vs post covid for concern unigrams
+comparison_data_concern <- full_join(pre_pandemic_concerns, during_pandemic_concerns, by = "word", suffix = c("_pre", "_during"))
+comparison_data_concern[is.na(comparison_data_concern)] <- 0
+comparison_data_concern_long <- comparison_data_concern %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+# Plot for concern unigrams
+ggplot(comparison_data_concern_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Concern Mentions Pre and During Pandemic", 
+       x = "Concerns", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+# Comparing pre vs post covid for concern bigrams
+comparison_data_concern_bigram <- full_join(pre_pandemic_concerns_bigram, during_pandemic_concerns_bigram, by = "word", suffix = c("_pre", "_during"))
+comparison_data_concern_bigram[is.na(comparison_data_concern_bigram)] <- 0
+comparison_data_concern_bigram_long <- comparison_data_concern_bigram %>% 
+  gather(key = "period", value = "count", n_pre, n_during)
+
+# Plot for concern bigrams
+ggplot(comparison_data_concern_bigram_long, aes(x = reorder(word, count), y = count, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Concern Bigram Mentions Pre and During Pandemic", 
+       x = "Concern Bigrams", y = "Number of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip() + coord_flip()
+
+```
+As percentages
+```{r}
+# Calculate total mentions for each period for unigrams
+total_pre_pandemic_concerns <- sum(comparison_data_concern$n_pre)
+total_during_pandemic_concerns <- sum(comparison_data_concern$n_during)
+
+# Calculate percentages for unigrams
+comparison_data_concern$percentage_pre <- (comparison_data_concern$n_pre / total_pre_pandemic_concerns) * 100
+comparison_data_concern$percentage_during <- (comparison_data_concern$n_during / total_during_pandemic_concerns) * 100
+
+# Melt the data for ggplot for unigrams
+comparison_data_concern_long_percentage <- comparison_data_concern %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Create the plot for unigrams using percentages
+covid_concerns_uni_percentage <- ggplot(comparison_data_concern_long_percentage, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Concern Mentions Pre and During Pandemic (Percentage)", 
+       x = "Concerns", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+# Calculate total mentions for bigrams for each period
+total_pre_pandemic_concerns_bigram <- sum(comparison_data_concern_bigram$n_pre)
+total_during_pandemic_concerns_bigram <- sum(comparison_data_concern_bigram$n_during)
+
+# Calculate percentages for bigrams
+comparison_data_concern_bigram$percentage_pre <- (comparison_data_concern_bigram$n_pre / total_pre_pandemic_concerns_bigram) * 100
+comparison_data_concern_bigram$percentage_during <- (comparison_data_concern_bigram$n_during / total_during_pandemic_concerns_bigram) * 100
+
+# Melt the data for ggplot for bigrams
+comparison_data_concern_bigram_long_percentage <- comparison_data_concern_bigram %>% 
+  gather(key = "period", value = "percentage", percentage_pre, percentage_during)
+
+# Create the plot for bigrams using percentages
+covid_concerns_bi_percentage <- ggplot(comparison_data_concern_bigram_long_percentage, aes(x = reorder(word, percentage), y = percentage, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Comparison of Concern Bigram Mentions Pre and During Pandemic (Percentage)", 
+       x = "Concern Bigrams", y = "Percentage of Mentions") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Dark2") + coord_flip()
+
+covid_concerns_uni_percentage
+covid_concerns_bi_percentage
+
+```
+
+
+## Concerns/Opinions/Problems
+
+```{r echo=FALSE}
+date_range_concerns <- count_terms(date_range, concern_unigrams)
+date_range_concerns_bigram <- count_terms(date_range, concern_bigrams, "bigrams")
+
+# Create the plot for unigrams
+ggplot(date_range_concerns, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[1]) +
+  labs(title = "Concerns Totals for Unigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+
+# Create the plot for bigrams
+ggplot(date_range_concerns_bigram, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = brewer.pal(8, "Dark2")[2]) +
+  labs(title = "Concerns Totals for Bigrams", 
+       x = "Platforms", y = "Number of Mentions") +
+  theme_minimal() + coord_flip()
+
+head(date_range_concerns, 10)
+head(date_range_concerns_bigram, 10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Code summary
+
+data_combined: This dataframe contains the combined posts and comments data.
+date_range: Contains data filtered between January 1, 2019, and December 31, 2021.
+pre_pandemic: Data filtered from January 1, 2019, to March 31, 2020 (pre-pandemic).
+during_pandemic: Data filtered from April 1, 2020, to December 31, 2021 (during the pandemic).
+pre_pandemic_platforms: Counts of platform unigram mentions during the pre-pandemic period.
+during_pandemic_platforms: Counts of platform unigram mentions during the pandemic.
+pre_pandemic_platforms_bigram: Counts of platform bigram mentions during the pre-pandemic period.
+during_pandemic_platforms_bigram: Counts of platform bigram mentions during the pandemic.
+date_range_platforms: Counts of platform unigram mentions in the date range (from 2019-01-01 to 2021-12-31).
+date_range_platforms_bigram: Counts of platform bigram mentions in the date range (from 2019-01-01 to 2021-12-31).
+
+
+```{r}
+# List of dataframes to be printed
+dataframes_list <- list(
+  data_combined = data_combined,
+  date_range = date_range,
+  pre_pandemic = pre_pandemic,
+  during_pandemic = during_pandemic,
+  pre_pandemic_platforms = pre_pandemic_platforms,
+  during_pandemic_platforms = during_pandemic_platforms,
+  pre_pandemic_platforms_bigram = pre_pandemic_platforms_bigram,
+  during_pandemic_platforms_bigram = during_pandemic_platforms_bigram,
+  date_range_platforms = date_range_platforms,
+  date_range_platforms_bigram = date_range_platforms_bigram
+)
+
+# Loop through the list and print the top 10 rows of each dataframe
+for(df_name in names(dataframes_list)) {
+  cat(paste("Head of", df_name, ":\n"))
+  print(head(dataframes_list[[df_name]], 10))
+  cat("\n")  # Add a newline for better formatting
+}
+
+```
+
