@@ -1,0 +1,751 @@
+---
+title: "Sentiment_Findings"
+output:
+  html_document:
+    fig_path: "images/"
+    fig.ext: "jpeg"
+date: "2023-10-24"
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(sentimentr)
+```
+
+# Correctly Matching up the dataframes
+
+```{r}
+
+
+# Read in the data
+data_with_sentimentr <- read.csv("data_clean/data_with_sentimentr.csv")
+data_with_sentiment_vader <- read.csv("data_clean/data_with_sentiment_vader.csv")
+
+# Trim whitespace from body and text columns
+data_with_sentimentr$body <- trimws(data_with_sentimentr$body)
+data_with_sentiment_vader$text <- trimws(data_with_sentiment_vader$text)
+
+# Remove duplicates
+data_with_sentimentr <- distinct(data_with_sentimentr, body, id, .keep_all = TRUE)
+data_with_sentiment_vader <- distinct(data_with_sentiment_vader, text, id, .keep_all = TRUE)
+
+# Join the datasets
+data <- left_join(data_with_sentimentr, data_with_sentiment_vader, 
+                  by = c("body" = "text", "id" = "id"))
+
+# View the joined data
+data
+
+data<- data %>%
+  mutate(ave_sentiment = general_rescale(ave_sentiment, lower = -1, upper = 1, keep.zero = TRUE))
+
+
+
+# random selection
+
+random_rows <- data %>% 
+  sample_n(10)
+
+random_rows
+
+# tests
+cat("Dimensions of data_with_sentimentr:", dim(data_with_sentimentr), "\n")
+cat("Dimensions of data_with_sentiment_vader:", dim(data_with_sentiment_vader), "\n")
+cat("Dimensions of the joined data:", dim(data), "\n")
+
+
+cat("Number of NAs in the joined data:\n")
+colSums(is.na(data))
+
+cat("Number of duplicate rows in the joined data:", sum(duplicated(data)), "\n")
+
+summary(data$body)
+summary(data$id)
+
+# here are the NA values
+
+na_word_scores_rows <- subset(data, is.na(word_scores))
+na_word_scores_rows
+
+#from this we can see there are spaces before the commoma
+data
+
+```
+
+
+
+
+```{r}
+
+# Melt the dataframe to get sentiment scores in a single column and method as another column
+data_melted <- melt(data, id.vars = c("text_ID"), measure.vars = c("ave_sentiment", "compound"), 
+                    variable.name = "method", value.name = "sentiment_score")
+
+data
+
+
+# Classify VADER scores
+data <- data %>%
+  mutate(vader_category = case_when(
+    compound < -0.05 ~ "negative",
+    compound > 0.05 ~ "positive",
+    TRUE ~ "neutral"
+  ))
+
+head(data)
+
+# Plot the data
+plot1 <- ggplot(data_melted, aes(x = text_ID, y = sentiment_score, fill = method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Comparison between sentimentr and VADER",
+       x = "Text ID",
+       y = "Sentiment Score",
+       fill = "Method")
+print(plot1)
+ggsave("images/comparison_plot.png", plot1)
+
+```
+ 
+# Sentiment agreement calculations
+
+Positive:
+Both sentimentr and VADER have classified the sentiment of the text as positive.
+This means the ave_sentiment score from sentimentr is greater than 0, and the compound score from VADER is also greater than 0.
+
+Negative:
+Both sentimentr and VADER have classified the sentiment of the text as negative.
+This means the ave_sentiment score from sentimentr is less than 0, and the compound score from VADER is also less than 0.
+
+Neutral:
+Both sentimentr and VADER have classified the sentiment of the text as neutral.
+This means the ave_sentiment score from sentimentr is exactly 0, and the compound score from VADER is also exactly 0.
+
+Disagree:
+sentimentr and VADER have differing classifications for the sentiment of the text.
+This could manifest in several ways:
+sentimentr classifies the text as positive, but VADER classifies it as negative (or vice versa).
+sentimentr classifies the text as positive, but VADER classifies it as neutral (or vice versa).
+sentimentr classifies the text as negative, but VADER classifies it as neutral (or vice versa).
+
+```{r}
+
+
+# Categorize sentiment scores as positive, negative, or neutral
+data$ave_sentiment_cat <- ifelse(data$ave_sentiment > 0, "positive", 
+                                 ifelse(data$ave_sentiment < 0, "negative", "neutral"))
+data$compound_cat <- ifelse(data$compound > 0, "positive", 
+                            ifelse(data$compound < 0, "negative", "neutral"))
+
+# Determine if sentiments from sentimentr and VADER agree or disagree
+data$agreement <- ifelse(data$ave_sentiment_cat == data$compound_cat, data$ave_sentiment_cat, "disagree")
+
+# Count the number of occurrences for each type of agreement/disagreement
+agreement_counts <- as.data.frame(table(data$agreement))
+
+# Plot the data
+plot2 <- ggplot(agreement_counts, aes(x = Var1, y = Freq, fill = Var1)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Agreement of Sentiments between sentimentr and VADER",
+       x = "Sentiment Agreement",
+       y = "Count",
+       fill = "Agreement Type") +
+  theme(legend.position = "none")
+
+agreement_counts
+
+print(plot2)
+ggsave("images/agreement_plot.png", plot2)
+```
+
+```{r}
+# Given counts
+agreement_counts <- c(disagree = 29871, negative = 17667, neutral = 5763, positive = 52438)
+
+# Combine the agreement types into a single 'agree' category
+counts_aggregated <- c(agree = sum(agreement_counts["negative"], agreement_counts["neutral"], agreement_counts["positive"]), 
+                       disagree = agreement_counts["disagree"])
+
+png("images/agreements_pie_chart.png")
+
+# Create a pie chart
+pie(counts_aggregated, 
+    main = "Agreements vs. Disagreements between sentimentr and VADER", 
+    col = c("lightblue", "lightcoral"), 
+    labels = round((counts_aggregated/sum(counts_aggregated))*100, 2))
+
+# Add a legend
+legend("topright", legend = names(counts_aggregated), fill = c("lightblue", "lightcoral"))
+dev.off()
+```
+
+```{r}
+# Filter the data to keep only rows where the agreement is "disagree"
+disagreements_df <- data[data$agreement == "disagree", c("text_ID", "body", "ave_sentiment","compound" )]
+
+# View the first few rows of the disagreements dataframe
+disagreements_df
+
+```
+
+# Checking difference 
+
+```{r}
+
+summary(disagreements_df$ave_sentiment)
+summary(disagreements_df$compound)
+
+library(ggplot2)
+
+# Scatter plot
+plot4 <- ggplot(disagreements_df, aes(x = ave_sentiment, y = compound)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, color = "red") +
+  theme_minimal() +
+  labs(title = "Scatter plot of sentimentr vs. VADER scores",
+       x = "sentimentr",
+       y = "VADER")
+
+# Density plot
+dendis <- disagreements_df %>%
+  gather(Method, Score, ave_sentiment, compound) %>%
+  ggplot(aes(x = Score, fill = Method)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Density plot of sentimentr vs. VADER scores",
+       x = "Score",
+       y = "Density")
+
+print(plot4)
+print(dendis)
+ggsave("images/dendis.png", dendis)
+ggsave("images/scatter.png", plot4)
+
+```
+# Sample review
+```{r}
+set.seed(123)  # for reproducibility
+sample_rows <- sample(1:nrow(disagreements_df), 10)
+sample_texts <- disagreements_df[sample_rows, c("text_ID", "body", "ave_sentiment", "compound")]
+print(sample_texts)
+
+```
+# Blad altman test:
+
+```{r}
+library(ggplot2)
+
+# Extract the scores
+measurement1 <- data$ave_sentiment  # SentimentR scores
+measurement2 <- data$compound       # Vader scores
+
+# Calculate means and differences
+means <- (measurement1 + measurement2) / 2
+differences <- measurement1 - measurement2
+mean_diff <- mean(differences)
+sd_diff <- sd(differences)
+
+# Calculate means and differences
+means <- (measurement1 + measurement2) / 2
+differences <- measurement1 - measurement2
+mean_diff <- mean(differences, na.rm = TRUE)
+sd_diff <- sd(differences, na.rm = TRUE)
+upper_limit <- mean_diff + 1.96*sd_diff
+lower_limit <- mean_diff - 1.96*sd_diff
+
+cat("Mean Difference:", mean_diff, "\n")
+cat("Upper Limit of Agreement:", upper_limit, "\n")
+cat("Lower Limit of Agreement:", lower_limit, "\n")
+
+# Create the plot with adjusted y-axis limits
+bland_altman_plot <- ggplot() + 
+  geom_point(aes(x = means, y = differences)) +
+  geom_hline(yintercept = mean_diff, color = "blue") +
+  geom_hline(yintercept = upper_limit, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = lower_limit, color = "red", linetype = "dashed") +
+  labs(title = "Bland-Altman Plot",
+       x = "Mean of Measurements",
+       y = "Difference between Measurements") +
+  ylim(min(lower_limit, min(differences, na.rm = TRUE)) - 1,
+       max(upper_limit, max(differences, na.rm = TRUE)) + 1)
+
+print(bland_altman_plot)
+```
+Interpretation:
+Bias: The average bias of 
+−
+0.2066924
+−0.2066924 indicates that SentimentR typically scores slightly lower than Vader.
+Agreement: The range between the upper and lower limits of agreement (
+0.7378461
+0.7378461 to 
+−
+1.151231
+−1.151231) represents the range within which the differences between the two methods are expected to fall for 95% of the measurements. If most of the points in the Bland-Altman plot lie between these two lines, it suggests that the two methods are in reasonable agreement.
+Consistency: If the differences between the two methods were scattered randomly around the mean difference (horizontal blue line), with no apparent patterns, this would suggest that there's no proportional bias between the two methods. Proportional bias would be indicated if, for example, the differences tend to increase or decrease as the average scores increase.
+Outliers: Any points outside the limits of agreement could be considered outliers and might warrant further investigation.
+
+In summary, while there's a slight bias with SentimentR scores being lower on average, the two methods generally agree within the range specified by the limits of agreement. The exact degree of acceptability of this agreement would depend on the specific application and requirements of your analysis
+
+```{r}
+correlation_coefficient <- cor(data$ave_sentiment, data$compound, use="complete.obs")
+print(correlation_coefficient)
+
+```
+Bland-Altman Analysis: Your Bland-Altman analysis showed a bias (SentimentR scores being, on average, slightly lower than Vader scores) and provided the limits of agreement.
+Correlation Analysis: The correlation coefficient of 
+0.4932984
+0.4932984 suggests a moderate positive relationship between the scores from the two methods, but not a very strong one.
+In summary:
+
+While there is a moderate positive trend between the scores from SentimentR and Vader, the two tools don't always rate texts in a highly similar manner. This is consistent with the Bland-Altman analysis, which showed a bias and a range of differences between the two methods.
+The two tools might be capturing different nuances or aspects of sentiment in the texts, leading to the observed differences and the moderate correlation.
+When presenting your findings, you can mention both analyses to provide a comprehensive view of how the two sentiment scoring methods compare.
+
+Finding the outliers
+
+```{r}
+# Calculate differences and limits of agreement
+differences <- data$ave_sentiment - data$compound
+mean_diff <- mean(differences, na.rm = TRUE)
+sd_diff <- sd(differences, na.rm = TRUE)
+upper_limit <- mean_diff + 1.96 * sd_diff
+lower_limit <- mean_diff - 1.96 * sd_diff
+
+# Add the differences to the data dataframe
+data$differences <- differences
+
+# Filter outliers
+outliers <- data[differences > upper_limit | differences < lower_limit, ]
+
+# Sort outliers by the absolute value of the differences in descending order
+outliers_sorted <- outliers[order(-abs(data$differences[differences > upper_limit | differences < lower_limit])), ]
+
+# View the sorted outliers dataframe
+outliers_sorted
+
+
+
+```
+
+Subjectively observing those with the highest difference in scores (outliers). We obeserved that vader would be the better option to go for.
+
+
+# everything from here 
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# List of words
+platform_unigrams <- c("technology", "device", "smartphone", "online", "gadget", "handset", "network", "electronic", "machine", "apparatus", "tech", "platform", "phone", "machinery", "app", "cell", "mobile", "community", "digital", "application", "media", "service", "web", "browser", "operating system", "streaming", "e-commerce", "search engine", "virtual reality", "augmented reality", "cloud", "gaming", "podcasts","television", "tv", "notifications", "smartwatch")
+
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(compound, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in platform_unigrams
+vader_sentiments <- bind_rows(lapply(platform_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot5 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "VADER Sentiment scores for platform unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot5)
+ggsave("images/sentiment_plat.png", plot5)
+
+
+```
+
+```{r}
+
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(ave_sentiment, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in platform_unigrams
+vader_sentiments <- bind_rows(lapply(platform_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot6 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "SentimentR Sentiment scores for platform unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot6)
+ggsave("images/sentimentr_sen.png", plot6)
+
+
+```
+
+
+density function
+
+```{r}
+# Function to extract sentiment scores associated with each word
+# Function to extract sentiment scores associated with each word
+get_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in platform_unigrams
+vader_scores <- bind_rows(lapply(platform_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_by_word <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +  # Remove legend due to potentially many words
+  facet_wrap(~ word, scales = "free_y") +  # Separate density plot for each word
+  labs(title = "Density plot of VADER scores for platform unigrams",
+       x = "Score",
+       y = "Density")
+
+print(plot4)
+ggsave("images/density_com.png", density_by_word)
+
+print(density_by_word)
+ggsave("images/density_com.png", density_by_word)
+
+```
+
+```{r}
+get_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in platform_unigrams
+vader_scores <- bind_rows(lapply(platform_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_plot <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Density plot of VADER scores for platform unigrams",
+       x = "Score",
+       y = "Density") +
+  theme(legend.position = "right")  # Adjust legend position if needed
+
+# Print the plot
+print(density_plot)
+
+ggsave("images/density_plot_vader_scores.png", density_plot)
+```
+
+# Social Media Sentiment Anlsysis
+
+```{r}
+# List of social media platforms
+social_platforms <- c("facebook", "youtube", "whatsapp", "messenger", "wechat", "instagram", "tiktok", "qq", "douyin", "sina weibo", "qzone", "snapchat", "reddit", "twitter", "linkedin", "pinterest", "telegram", "viber", "discord", "twitch", "baidu tieba", "signal", "skype", "zoom", "microsoft teams", "slack", "clubhouse", "tumblr", "spotify", "netflix", "tinder", "hinge", "disneyplus")
+
+
+# Function to filter rows containing specific words (social platforms) and calculate average sentiment using VADER
+get_avg_vader_social <- function(platform, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), platform)) %>%
+    summarise(avg_vader = mean(compound, na.rm = TRUE))
+  
+  return(data.frame(platform = platform, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each social platform
+vader_sentiments_social <- bind_rows(lapply(social_platforms, get_avg_vader_social, data = data))
+
+# Filter out rows with NaN values in avg_vader
+vader_sentiments_social <- vader_sentiments_social[!is.na(vader_sentiments_social$avg_vader), ]
+
+vader_sentiments_social
+
+# Visualize with bars sorted from high to low based on avg_vader
+plot_social <- ggplot(vader_sentiments_social, aes(x = reorder(platform, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "VADER Sentiment scores for social media platforms",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot_social)
+ggsave("images/sentiment_social.png", plot_social)
+
+
+```
+Sentiment R analysis 
+
+```{r}
+# Function to filter rows containing specific words and calculate average sentiment using sentimentr
+get_avg_sentimentr_social <- function(platform, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), platform)) %>%
+    summarise(avg_sentimentr = mean(ave_sentiment, na.rm = TRUE))
+  
+  return(data.frame(platform = platform, avg_sentimentr = filtered_data$avg_sentimentr))
+}
+
+# Use the function to get average sentimentr sentiments for each social platform
+sentimentr_sentiments_social <- bind_rows(lapply(social_platforms, get_avg_sentimentr_social, data = data))
+
+# Filter out rows with NaN values in avg_sentimentr
+sentimentr_sentiments_social <- sentimentr_sentiments_social[!is.nan(sentimentr_sentiments_social$avg_sentimentr), ]
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_sentimentr
+plot_sentimentr_social <- ggplot(sentimentr_sentiments_social, aes(x = reorder(platform, avg_sentimentr), y = avg_sentimentr, fill = avg_sentimentr)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "SentimentR Sentiment scores for social media platforms",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot_sentimentr_social)
+ggsave("images/sentimentr_social.png", plot_sentimentr_social)
+sentimentr_sentiments_social
+```
+
+
+
+
+Density plot
+
+```{r}
+# Function to extract sentiment scores associated with each social platform
+get_vader_scores_social <- function(platform, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), platform))
+  
+  if (nrow(filtered_data) > 0) {
+    return(data.frame(platform = platform, compound = filtered_data$compound))
+  } else {
+    return(NULL)
+  }
+}
+
+# Use the function to get VADER sentiments for each social platform
+vader_scores_social <- bind_rows(lapply(social_platforms, get_vader_scores_social, data = data))
+
+# Filter out NULL values
+vader_scores_social <- vader_scores_social[!is.null(vader_scores_social$compound), ]
+
+# Create a facet-wrapped density plot
+density_plot_social <- vader_scores_social %>%
+  ggplot(aes(x = compound, fill = platform)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  facet_wrap(~ platform, scales = "free_y") +
+  labs(title = "Density plot of VADER scores for social media platforms",
+       x = "Score",
+       y = "Density")
+
+# Print the plot
+print(density_plot_social)
+
+# Save the facet-wrapped density plot
+ggsave("images/density_plot_social.png", density_plot_social)
+
+
+```
+
+```{r}
+# Function to extract sentiment scores associated with each word for social media platforms
+get_vader_scores_social <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  if (nrow(filtered_data) > 0) {
+    return(data.frame(word = word, compound = filtered_data$compound))
+  } else {
+    return(NULL)
+  }
+}
+
+# Use the function to get VADER sentiments for each word in social_platforms
+vader_scores_social <- bind_rows(lapply(social_platforms, get_vader_scores_social, data = data))
+
+# Filter out NULL values
+vader_scores_social <- vader_scores_social[!is.null(vader_scores_social$compound), ]
+
+# Density plot visualization
+density_plot_social <- vader_scores_social %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Density plot of VADER scores for social media platforms",
+       x = "Score",
+       y = "Density") +
+  theme(legend.position = "right")  # Adjust legend position if needed
+
+# Print the plot
+print(density_plot_social)
+
+
+
+```
+
+
+
+
+
+# Ane: Concerns
+
+
+```{r}
+concern_unigrams <- c("anxiety", "stress", "addiction", "overwhelm", "overuse", "dependency", "distraction", "privacy", "isolation", "compulsion", "fatigue", "insecurity", "bias", "manipulation", "misinformation", "burnout", "exploitation", "alienation", "harassment", "bullying")
+
+
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(compound, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in concern_unigrams
+vader_sentiments <- bind_rows(lapply(concern_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot5 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "VADER Sentiment scores for concern unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot5)
+ggsave("images/sentiment_plat.png", plot5)
+
+```
+
+
+
+```{r}
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(ave_sentiment, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in concern_unigrams
+vader_sentiments <- bind_rows(lapply(concern_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot6 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "SentimentR Sentiment scores for concern unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot6)
+ggsave("images/sentimentr_sen.png", plot6)
+
+```
+
+```{r}
+# Function to extract sentiment scores associated with each word
+get_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in concern_unigrams
+vader_scores <- bind_rows(lapply(concern_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_by_word <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +  # Remove legend due to potentially many words
+  facet_wrap(~ word, scales = "free_y") +  # Separate density plot for each word
+  labs(title = "Density plot of VADER scores for concern unigrams",
+       x = "Score",
+       y = "Density")
+
+print(plot4)
+ggsave("images/density_com.png", density_by_word)
+
+print(density_by_word)
+ggsave("images/density_com.png", density_by_word)
+```
+```{r}
+et_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in concern_unigrams
+vader_scores <- bind_rows(lapply(concern_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_plot <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Density plot of VADER scores for concern unigrams",
+       x = "Score",
+       y = "Density") +
+  theme(legend.position = "right")  # Adjust legend position if needed
+
+# Print the plot
+print(density_plot)
+
+ggsave("images/density_plot_vader_scores.png", density_plot)
+```
+
+
