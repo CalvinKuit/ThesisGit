@@ -1,0 +1,418 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, furrr, ldatuning, stm, huge)
+```
+
+## load the data
+
+```{r}
+data_tokenised<- read_csv("data_clean/data_filtered_annotated_for_topic_modelling.csv", show_col_types = FALSE)
+data_tokenised
+```
+
+```{r}
+data_for_topic_modelling<- read_csv("data_clean/data_combined_sentiment.csv", show_col_types = FALSE)
+data_for_topic_modelling
+```
+
+## Set up for LDA and/or CTM topic modelling
+
+
+```{r}
+number_of_messages <- n_distinct(data_tokenised$doc_id)
+
+selected_terms <- data_tokenised %>%  
+  count(lemma, doc_id) %>% 
+  group_by(lemma) %>% 
+  tally() %>% 
+  mutate(prop = n/number_of_messages) %>%  
+  filter(prop < 0.4) %>%   #remove all terms that occur in more than 40% of messages (1 term)
+  filter(prop > 0.001) %>%  #remove all terms that occur in less than 0.1% of messages
+  arrange(desc(prop))
+
+rm(number_of_messages)
+
+data_tokenised <- data_tokenised |> 
+  filter(lemma %in% selected_terms$lemma)
+
+data_tokenised
+```
+
+
+## Term frequency:
+```{r}
+data_words<- data_tokenised %>% 
+  count(doc_id, lemma, sort=TRUE)
+
+data_tf_idf <- data_words %>% 
+  bind_tf_idf(lemma, doc_id, n) %>% 
+  rename(word = lemma)
+```
+
+
+```{r}
+data_tf_idf %>% 
+  count(word, sort=TRUE) 
+```
+
+Could filter out some custom stop words from (depending on the topics)
+- something
+- anything
+- stuff
+- someone
+- everything
+etc.
+
+But lets see after LDA, CTM if this is necessary. This will also depend on the topic number
+
+
+## Creating a dtm
+
+This casting process allows for reading, filtering, and processing to be done using dplyr and other tidy tools, after which the data can be converted into a document-term matrix for machine learning applications. 
+
+```{r}
+data_dtm <- data_tf_idf %>% 
+  cast_dtm(doc_id, word, n)
+```
+  
+
+# Determine how many topics we need:
+
+```{r}
+start_time <- Sys.time()
+
+num_topics <- FindTopicsNumber(data_dtm, 
+                 topics = seq(from = 2, to = 50, by = 1), 
+                 metrics = c("CaoJuan2009", "Arun2010", "Deveaud2014"), # note "Griffiths2004" not compatible with VEM
+                 method = "VEM",
+                 control = list(seed = 77),
+                 mc.cores = 4L, #adjust based on your machines
+                 verbose = TRUE)
+
+end_time <- Sys.time()
+
+total_time = end_time - start_time
+total_time # this takes about 30 minutes to run using future for parallelisation. Otherwise, it takes closer to two hours to run if run sequentially
+```
+
+```{r}
+FindTopicsNumber_plot(num_topics)
+```
+10 - 20 would be reasonable. Try 10 if it doesn't produce coherent topics we can try higher. Could 
+
+## LDA
+
+```{r}
+set.seed(385)
+
+model_lda <- topicmodels::LDA(data_dtm, k = 10, method="VEM")
+```
+
+```{r}
+lda_topics <- tidy(model_lda, matrix = "beta")
+write.csv(lda_topics, "data_clean/lda_topics.csv")
+```
+
+### Word-topic probabilities
+
+```{r}
+# lda_topics <- read.csv("data_clean/lda_topics.csv")
+
+
+lda_topics %>% 
+  group_by(topic) %>% 
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta) %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic)))+
+  geom_col(show.legend = FALSE)+
+  facet_wrap(~topic, scales = "free")+
+  scale_y_reordered() + theme_minimal()
+```
+
+### Document-topic probabilities
+
+```{r}
+lda_topic_documents <- tidy(model_lda, matrix = "gamma")
+
+write.csv(lda_topic_documents, "data_clean/lda_topic_documents.csv")
+
+lda_topic_documents %>% arrange(document)
+```
+
+Join all the data with the document topics
+```{r}
+lda_topic_documents_all_columns <- lda_topic_documents %>% 
+  dplyr::left_join(data_for_topic_modelling, by = c("document" = "id"))  %>% 
+  rename(id = document)
+
+lda_topic_documents_all_columns 
+```
+
+Consider document-topic distributions (if these are low its another indicator that we probably need more topics)
+```{r}
+lda_topic_documents_all_columns %>% 
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(alpha = 0.8, show.legend = FALSE, bins = 20) +
+  facet_wrap(~ topic, ncol = 4) +
+  labs(title = "Distribution of probability for each topic",
+       y = "Number of documents", x = expression(gamma))
+```
+
+Identify the topics most associated with a given document (article).
+
+We can inspect the probabilities here and decide if 1 or 2 topics per document makes the most sense. I suspect that 1 might be a good idea - we can try it and see.
+
+```{r}
+data_topics_and_details <- lda_topic_documents_all_columns %>% 
+  group_by(id) %>% 
+  slice_max(gamma, n = 1) %>%
+  ungroup() %>% 
+  mutate(topic = as.factor(topic))
+
+
+data_topics_and_details
+
+```
+
+
+```{r}
+data_topics_and_details %>% 
+  summarise(mean = mean(gamma),
+            sd = sd(gamma),
+            min = min(gamma),
+            max = max(gamma))
+```
+
+#Descriptive analysis of topics overall 
+
+Overall
+```{r}
+data_topics_and_details %>% 
+  group_by(topic) %>% 
+  tally() %>% 
+  mutate(Percentage = round((n / sum(n)*100),2)) %>% 
+  arrange(desc(Percentage)) 
+
+write.csv(data_topics_and_details, "data_clean/data_topics_and_details.csv")
+```
+
+## plot over time
+
+Raw counts
+
+```{r}
+data_topics_and_details %>% 
+  mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  filter(year_month > "2018-12") %>% #because don't have full data for earlier years
+  filter(year_month < "2022-01")  %>% 
+  group_by(year_month, topic) %>% 
+  tally() %>% 
+  ggplot(aes(x = year_month, y = n, 
+             color = as.factor(topic), 
+             group=as.factor(topic))) +
+  stat_summary(fun = sum, geom = "line", size=1)+
+  labs(y= "Count",
+       x = "Month",
+       color = "Topic",
+       title = "Topic prevalence over time")+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        plot.title = element_text(face = "bold", size = 18),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+```
+
+May want to plot as a percentage in that month?
+
+```{r}
+data_topics_and_details %>% 
+  mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  filter(year_month > "2018-12") %>% #because don't have full data for earlier years
+  filter(year_month < "2022-01")  %>% 
+  group_by(year_month, topic) %>% 
+  tally() %>% 
+  group_by(year_month) %>% 
+  mutate(prop = round((n / sum(n)*100),2)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year_month, y = prop, 
+             fill = as.factor(topic), 
+             group=as.factor(topic))) +
+  geom_area()+
+  #stat_summary(fun = sum, geom = "line", size=1)+
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set3")+
+  labs(y= "Percent",
+       x = "Month",
+       fill = "Topic",
+       title = "Topic prevalence over time")+
+  guides(fill = guide_legend(nrow = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        plot.title = element_text(face = "bold", size = 18),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"),
+        axis.line = element_line(size = 1.2),
+        legend.position = "bottom")
+```
+
+## CTM
+
+The correlated topics model (CTM; Blei and Lafferty 2007) is an extension of the LDA model where correlations between topics are allowed. Different from LDA, CTM assumes that the topic probabilities/proportions are related. 
+
+The C code for CTM from David M. Blei and co-authors is used to estimate and fit a correlated topic model.
+
+https://rpubs.com/chelseyhill/672546
+
+The CTM extends the LDA model by relaxing the independence assumption of LDA. As in the LDA model, CTM is a mixture model and documents belong to a mixture of topics. CTM uses the same methodological approach as LDA, but it creates a more flexible modeling approach than LDA by replacing the Dirichlet distribution with a logistic normal distribution and explicitly incorporating a covariance structure among topics (Blei and Lafferty 2007). While this method creates a more computationally expensive topic modeling approach, it allows for more realistic modeling by allowing topics to be correlated. Additionally, Blei and Lafferty (2007) show that the CTM model outperforms LDA.
+
+We'll also need to think about the number of topics to run. I've started with 10 as a default but in all likelihood, if we go with the CTM process, we'll need to adjust this.
+
+```{r}
+model_ctm <-topicmodels::CTM(data_dtm, k = 10, method = "VEM", control = list(seed = 1234)) #this can take ~ 1 hour to run
+```
+
+```{r}
+ctm_topics <- tidy(model_ctm, matrix = "beta")
+write.csv(ctm_topics, "data_clean/ctm_topics.csv")
+```
+
+### Word-topic probabilities
+
+For each topic-term combination (represented on a row) the model estimates the probability of a term belonging to the topic. We can identify the 10 terms most associated with a given topic.
+
+This figure highlights the terms most representative of a given topic.
+
+```{r}
+ctm_topics %>% 
+  group_by(topic) %>% 
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta) %>% 
+  mutate(term = reorder_within(term, beta, topic)) %>% 
+  ggplot(aes(beta, term, fill = factor(topic)))+
+  geom_col(show.legend = FALSE)+
+  facet_wrap(~topic, scales = "free")+
+  scale_y_reordered() + theme_minimal()
+```
+
+We need to use these to decide what each topic is about and then label each topic (and as below add that label to the dataset for each document)
+To help add qualitative labels to the topics it may also be useful to look at a handful of articles tagged with the topic (as in the gamma value)
+This will be a bit of a discussion and there are no right/wrong answers here and it may evolve as we work through it.
+
+We may also realise that some generic research terms come up that aren't useful - in which case we can go back and update the cleaning and re-run the topic modelling process.
+
+LDA also models each document as a mixture of topics. We can examine the per-document-per-topic probabilities, called gamma. Note, here documents = articles. We might then assign the topic to a document that has the highest probability
+
+
+```{r}
+ctm_documents <- tidy(model_ctm, matrix = "gamma")
+write.csv(ctm_documents, "data_clean/ctm_documents.csv")
+```
+
+```{r}
+ctm_topic_documents_all_columns <- ctm_documents %>% 
+  dplyr::left_join(data_for_topic_modelling, by = c("document" = "id"))  %>% 
+  rename(id = document)
+
+ctm_topic_documents_all_columns 
+
+ctm_topic_documents_all_columns %>% 
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(alpha = 0.8, show.legend = FALSE, bins = 20) +
+  facet_wrap(~ topic, ncol = 4) +
+  labs(title = "Distribution of probability for each topic",
+       y = "Number of documents", x = expression(gamma))
+```
+
+Identify the topics most associated with a given document (article).
+
+We can inspect the probabilities here and decide if 1 or 2 topics per document makes the most sense. I've started with 2 but suspect that 1 might be a good idea - we can try it and see.
+
+```{r}
+data_ctm_topics_and_details <- ctm_topic_documents_all_columns %>% 
+  group_by(id) %>% 
+  slice_max(gamma, n = 1) %>%
+  ungroup() %>% 
+  mutate(topic = as.factor(topic))
+
+data_ctm_topics_and_details %>% 
+  summarise(mean = mean(gamma),
+            sd = sd(gamma),
+            min = min(gamma),
+            max = max(gamma))
+```
+
+#Descriptive analysis of topics overall 
+
+Overall
+```{r}
+data_ctm_topics_and_details %>% 
+  group_by(topic) %>% 
+  tally() %>% 
+  mutate(Percentage = round((n / sum(n)*100),2)) %>% 
+  arrange(desc(Percentage)) 
+```
+
+## plot over time
+
+Raw counts
+
+```{r}
+data_ctm_topics_and_details %>% 
+  mutate(date = as.Date(date),
+         year_month = format_ISO8601(date, precision = "ym")) %>% 
+  filter(year_month > "2018-12") %>% #because don't have full data for earlier years
+  filter(year_month < "2022-01")  %>% 
+  group_by(year_month, topic) %>% 
+  tally() %>% 
+  ggplot(aes(x = year_month, y = n, 
+             color = as.factor(topic), 
+             group=as.factor(topic))) +
+  stat_summary(fun = sum, geom = "line", size=1)+
+  labs(y= "Count",
+       x = "Month",
+       color = "Topic",
+       title = "Topic prevalence over time")+
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12),
+        panel.grid.major.y = element_line(color = "grey80"),
+        panel.grid.minor.y = element_line(color = "grey80"),
+        plot.title = element_text(face = "bold", size = 18),
+        axis.text = element_text(size = 13),
+        axis.title = element_text(size = 16, face = "bold"))
+```
+
+```{r}
+data_ctm_topics_and_details %>% 
+  group_by(topic) %>% 
+  slice_max(gamma, n=10) %>% 
+  select(id, topic, gamma, body)
+```
+
+

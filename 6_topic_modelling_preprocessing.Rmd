@@ -1,0 +1,841 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r setup, message=FALSE, warning=FALSE}
+#set environmental variables
+rm(list = ls())
+options(scipen = 999)
+set.seed(42)
+
+#load required packages (if not installed, pacman will install them)
+if (!require("pacman")) install.packages("pacman");
+library(pacman)
+pacman::p_load(tidyverse, lubridate, tidytext,
+               tm, topicmodels, topicmodels, Rcpp, 
+               udpipe, car, stats, sentimentr, lexicon, 
+               textdata, tokenizers, zoo, patchwork, ggforce, scales,
+               vader, parallel, future, furrr, emoji)
+```
+
+
+```{r}
+data_for_topic_modelling<- read_csv("data_clean/data_for_topic_modelling.csv", show_col_types = FALSE)
+data_for_topic_modelling
+```
+
+## Data prep for topic modelling
+
+First use the `udpipe` package to clean the data.
+https://cran.r-project.org/web/packages/udpipe/index.html 
+
+## remove numbers
+```{r}
+data_for_topic_modelling <- data_for_topic_modelling %>%
+  mutate(body = gsub(body, pattern = "[0-9]+", replacement = "")) 
+```
+
+## Annotate text using udpipe
+
+```{r}
+num_cores = detectCores()
+
+annotate_splits <- function(text){
+  english_language_model <- udpipe_load_model(file = "english-ewt-ud-2.5-191206.udpipe")
+  
+  annotation <- udpipe_annotate(english_language_model,
+                                x = text$body,
+                                doc_id = text$id,
+                                tokenizer = "tokenizer",
+                                tagger = c("default", "none"),
+                                parser = "none",
+                                trace=FALSE
+                                )
+  data <- as.data.frame(annotation, detailed = TRUE)
+  return(data)
+}
+
+split_data <- split(data_for_topic_modelling, seq(1, nrow(data_for_topic_modelling), by = 1000))
+
+start_time <- Sys.time()
+
+plan(multisession, workers = num_cores-2) #use 2 less cores than the max on the machine
+
+set.seed(42)
+
+dfs <- future_map(split_data, 
+                  annotate_splits, 
+                  .progress = TRUE, 
+                  .options=furrr_options(seed = TRUE))
+
+data_annotated <- dplyr::bind_rows(dfs)
+
+plan(multisession, workers = 1)
+
+end_time <- Sys.time()
+
+total_time = end_time - start_time
+total_time # this takes about 10 minutes to run using future for parallelisation. Otherwise, it takes closer to an hour to run if run sequentially
+```
+
+# Export annotated dataset
+```{r}
+write.csv(data_annotated, "data_clean/data_udpipe_annotated.csv")
+```
+
+
+**You can consider making a 6.1_topic_model_preprocessing Rmd here so you don't have to run the above everytime... it can import the above csv as its starting point.**
+
+# Filter to only certain parts of speech
+
+Retain words tagged with NN (noun, singular or mass), NNS (noun, plural), NNP (proper noun, singular), NNPS (proper noun, plural).
+
+https://cran.r-project.org/web/packages/udpipe/vignettes/udpipe-usecase-topicmodelling.html 
+https://aclanthology.org/U15-1013.pdf 
+
+Remove words shorter than 4 characters
+
+It has been shown that a combination of lemmatization and limiting the corpus to just nouns provides a coherence advantage and lower word intrusion in topic modelling (Martin and Johnson, 2015). 
+
+- Determine if this makes sense for us
+  - run the topic models and decide if they are coherent
+  - if yes, proceed as is
+  - if not look to include verbs/adjectives (look for the xpos code) and rerun
+  - then determine if the new topic models are better
+  - go with whichever set you feel is more coherent.
+  
+```{r}
+english_language_model <- udpipe_load_model(file = "english-ewt-ud-2.5-191206.udpipe")
+data_annotated <- read.csv("data_clean/data_udpipe_annotated.csv")
+data_for_topic_modelling <- read.csv("data_clean/data_for_topic_modelling.csv")
+
+data_tokenised <- data_annotated %>% 
+  filter(xpos %in% c("NN", "NNS", "NNPS", "NNP")) %>%   
+  filter(str_length(lemma) >3) %>%  
+  select(doc_id, sentence_id, sentence, token, lemma, xpos)
+
+rm(data_annotated, data_for_topic_modelling, dfs, split_data, english_language_model)
+gc()
+```
+
+Inspect data tokenised for further pre-processing
+
+```{r}
+data_tokenised
+```
+
+## Inspect most common words
+```{r}
+data_tokenised %>% 
+  count(lemma) %>% 
+  arrange(n)
+```
+
+# Further cleaning
+
+```{r}
+data_tokenised
+```
+
+
+```{r}
+data_tokenised <- data_tokenised %>% 
+  filter(!str_detect(lemma, "www"))
+
+write.csv(data_tokenised, "data_clean/data_tokenised.csv")
+```
+
+```{r}
+data_tokenised <- read.csv("data_clean/data_tokenised.csv")
+
+data_tokenised
+```
+Data Cleaning
+
+Remove hashtags
+Remove URLs (www, http, https, UserScript)
+Remove subreddit mentions ("r/")
+remove emoji filter(!emoji_detect(lemma))
+Remove double __ and double --
+Remove em dash  use str_remove and find the unicode for it
+Remove usernames "u/"
+Remove leading elipses "^\\.\\."
+Remove leading colons and semicolons
+Identify dot followed by text "^\\.."
+Remove percent symbol
+Remove asterisk "\\*\\*"
+Remove leading slash "^/"
+Remove @
+Use punctuation to identify other irrelevant lemmas (see example below)
+these can incldue + ^ ~ [ ] | * & ` $ symbols among others --> perhaps look for a function to strip/remove punctuation from strings of text
+
+
+Self Done
+```{r}
+data_tokenised <- data_tokenised %>%
+  filter(!str_detect(lemma, "^#"))
+
+# Remove URLs
+data_tokenised <- data_tokenised %>%
+  filter(!str_detect(lemma, "^(www\\.|http://|https://|UserScript)"))
+
+# Remove subreddit mentions
+data_tokenised <- data_tokenised %>%
+  filter(!str_detect(lemma, "^r/"))
+
+# Remove emojis - Assuming you have a function called emoji_detect
+data_tokenised <- data_tokenised %>%
+  filter(!emoji_detect(lemma))
+
+# Remove double __ and double --
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "__|--"))
+
+# Remove em dash
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "\\u2014"))  # Unicode for em dash
+
+# Remove usernames
+data_tokenised <- data_tokenised %>%
+  filter(!str_detect(lemma, "^u/"))
+
+# Remove leading ellipses
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "^\\.\\."))
+
+# Remove leading colons and semicolons
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "^[;:]"))
+
+# Identify dot followed by text
+# Not sure what to do after identifying, so just showing the detection here
+data_tokenised <- data_tokenised %>%
+  mutate(dot_followed_by_text = str_detect(lemma, "^\\.."))
+
+# Remove percent symbol
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "%"))
+
+# Remove double asterisk
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "\\*\\*"))
+
+# Remove leading slash
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "^/"))
+
+# Remove @
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "@"))
+
+# Removing punctuations
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = str_remove_all(lemma, "[[:punct:]]"))
+
+# After all the cleaning, you may want to remove rows with empty lemmas
+data_tokenised <- data_tokenised %>%
+  filter(lemma != "")
+
+data_tokenised
+
+```
+from 1,266,486 to 1,263,860 = 2626 removed
+
+```{r}
+data_tokenised <- data_tokenised %>% 
+  filter(!str_detect(lemma, "\\+"))
+```
+
+correct words that have been "sensored" (others??)
+
+```{r}
+data_tokenised <- data_tokenised %>%
+  mutate(lemma = case_when(
+    lemma == "sh*t" ~ "shit",
+    lemma == "sh**t" ~ "shit",
+    lemma == "p*rn" ~ "porn",
+    lemma == "P*rn" ~ "porn",
+    lemma == "f*ck" ~ "fuck",
+    lemma == "f*ing" ~ "fucking",
+    lemma == "f**king" ~ "fucking",
+    lemma == "s*it" ~ "shit",
+    lemma == "b*tch" ~ "bitch",
+    lemma == "b**ch" ~ "bitch",
+    lemma == "b*stard" ~ "bastard",
+    lemma == "d*mn" ~ "damn",
+    lemma == "h*ll" ~ "hell",
+    lemma == "a**" ~ "ass",
+    lemma == "a**hole" ~ "asshole",
+    lemma == "cr*p" ~ "crap",
+    lemma == "fr*g" ~ "frig",
+    lemma == "fr*gg*n" ~ "friggin",
+    lemma == "bl**dy" ~ "bloody",
+    lemma == "b*llsh*t" ~ "bullshit",
+    lemma == "f*g" ~ "fag",
+    lemma == "f**got" ~ "faggot",
+    lemma == "m*therf*cker" ~ "motherfucker",
+    lemma == "p*ssy" ~ "pussy",
+    lemma == "p*ssed" ~ "pissed",
+    lemma == "d*ck" ~ "dick",
+    lemma == "d*ckhead" ~ "dickhead",
+    lemma == "c*nt" ~ "cunt",
+    lemma == "tw*t" ~ "twat",
+    lemma == "w*nker" ~ "wanker",
+    TRUE ~ lemma
+  ))
+
+data_tokenised
+
+```
+
+remove punctuation (except for / if / replace with space and then split)
+```{r}
+data_tokenised<- data_tokenised %>% 
+  mutate(lemma = str_replace_all(lemma, "[/]", " ")) %>% #replace / with space
+  mutate(lemma = str_remove_all(lemma, "[^\\P{P}[-]]")) #remove all punctuation except for - (may decide later to also remove -)
+
+#split based on space
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = strsplit(lemma, "\\s")) %>% 
+  unnest(lemma)
+```
+
+```{r}
+data_tokenised
+```
+
+Remove short lemmas produced during cleaning... swap the number below for 1, 2, 3, 4, 5 and decide at what point "reasonable" words appear and only remove up to there.. probably will set it at 3 or 4 but need to run and see what comes up to make the call
+
+```{r}
+data_tokenised <- data_tokenised %>% 
+filter(str_length(lemma) >3) #>3
+
+data_tokenised
+```
+
+Make all lowercase for Topic modelling. Mutate and tolower
+
+count 4 letter letter lemmas and look at the rare ones for possible removal (as may be errors from other cleaning processes)
+
+```{r}
+four_letter_lemmas_appearing_once <- data_tokenised %>% 
+filter(str_length(lemma) ==4) %>% 
+  group_by(lemma) %>% 
+  tally() %>% 
+  filter(n == 1)
+
+four_letter_lemmas_appearing_once
+
+data_tokenised<- data_tokenised %>% 
+  anti_join(four_letter_lemmas_appearing_once, by = "lemma")
+
+data_tokenised
+
+```
+Inspect very long words as they may be erroneous/spam/meaningless terms/refer to usernames/URLS/etc.
+
+and decide on a threshold that makes sense.. remove all words above a particular threshold?
+
+remove everything over 18
+```{r}
+max_length = 15 #change this number for the max length of word to include...
+
+data_tokenised <- data_tokenised %>%
+  filter(str_length(lemma) < max_length)  
+
+data_tokenised
+```
+
+Remove lemmas with repetitions of the same character 3+ times (inspect the output and decide if this makes sense) 
+These will be treated as rare words and negatively impact the topic model
+```{r}
+data_tokenised <- data_tokenised %>% 
+  filter(!str_detect(lemma, "(.)\\1{2,}"))
+
+data_tokenised
+```
+
+Fix other issues - mostly spelling or mis-characterisation by udpipe. I've started this but you'll need to search through the lemmas (group by lemma and count and look for those that don't come up very often to try find more words that were incorrectly labelled)
+
+```{r}
+data_tokenised |> 
+  group_by(lemma) |> 
+  tally()
+
+data_tokenised
+```
+
+
+```{r}
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = case_when(lemma == "instagrbe"~ "instragram",
+                           lemma == "tasnks" ~ "tasks",
+                           lemma == "improveament" ~ "improvement",
+                           lemma == "boonks" ~ "books",
+                           lemma == "reade" ~ "reader",
+                           lemma == "tuff" ~ "stuff",
+                           lemma == "headach" ~ "headache",
+                           lemma == "someth" ~ "something",
+                           lemma == "kinday" ~ "kinda",
+                           lemma == "phine" ~ "phone",
+                           lemma == "consum" ~ "consume",
+                           lemma == "meditat" ~ "meditate",
+                           lemma == "homescreens" ~ "homescreen",
+                           lemma == "classis" ~ "classes",
+                           lemma == "liive" ~ "living",
+                           lemma == "scrolle" ~ "scroll",
+                           lemma == "scroller" ~ "scroll",
+                           lemma == "adventur" ~ "adventure",
+                           lemma == "featur" ~ "feature",
+                           lemma == "hatve" ~ "tv",
+                           lemma == "algo" ~ "algorithm",
+                           lemma == "programm" ~ "programming",
+                           lemma == "wellbe" ~ "wellbeing",
+                           lemma == "insto" ~ "instragram",
+                           lemma == "pleasur" ~ "pleasure",
+                           lemma == "notificationd" ~ "notification",
+                           lemma == "notif" ~ "notification",
+                           lemma == "activite" ~ "activites",
+                           lemma == "dopamin" ~ "dopamine",
+                           lemma == "insof" ~ "instagram",
+                           lemma == "worrie" ~ "worries",
+                           lemma == "dumphone" ~ "dumbphone",
+                           lemma == "responsis" ~ "response",
+                           lemma == "statuse" ~ "status",
+                           lemma == "yourhou" ~ "yourhour",
+                           lemma == "casis" ~ "case",
+                           lemma == "desicion" ~ "decision",
+                           lemma == "facebake" ~ "facebook",
+                           lemma == "glassis" ~ "glasses",
+                           lemma == "identitie" ~ "identity",
+                           lemma == "swimm" ~ "swimming",
+                           lemma == "ther" ~ "there",
+                           lemma == "unus" ~ "university",
+                           lemma == "acce" ~ "access",
+                           lemma == "becuase" ~ "because",
+                           lemma == "stopgam" ~ "stopgaming",
+                           lemma == "stayfocuse" ~ "stayfocused",
+                           lemma == "creatife" ~ "creative",
+                           lemma == "personalitie" ~ "personality",
+                           lemma == "arguement" ~ "argument",
+                           lemma == "excercise" ~ "exercise",
+                           lemma == "garde" ~ "garden",
+                           lemma == "itune" ~ "itunes",
+                           lemma == "andriod" ~ "android",
+                           lemma == "lonliness" ~ "loneliness",
+                           lemma == "algorithim" ~ "algorithm",
+                           lemma == "causis" ~ "cause",
+                           lemma == "coursis" ~ "course",
+                           lemma == "depresse" ~ "depression",
+                           lemma == "smth" ~ "something",
+                           lemma == "storie" ~ "story",
+                           lemma == "thesteey" ~ "esteem",
+                           lemma == "curiousity" ~ "curiosity",
+                           lemma == "tiktoks" ~ "tiktok",
+                           lemma == "e-book" ~ "ebook",
+                           lemma == "freind" ~ "friend",
+                           lemma == "guil" ~ "guilt",
+                           lemma == "anti-depressant" ~ "antidepressant",
+                           lemma == "hatre" ~ "hatred",
+                           lemma == "humwe" ~ "humour",
+                           lemma == "caffiene" ~ "caffeine",
+                           lemma == "functionalitie" ~ "functionality",
+                           lemma == "benifit" ~ "benefit",
+                           lemma == "calender" ~ "calendar",
+                           lemma == "adiction" ~ "addiction",
+                           lemma == "dumbphones" ~ "dumbphone",
+                           lemma == "reccomendation" ~ "recommendation",
+                           lemma == "procastination" ~ "procrastination",
+                           lemma == "recomendation" ~ "recommendation",
+                           lemma == "withdrawl" ~ "withdrawal",
+                           lemma == "excit" ~ "exciting",
+                           lemma == "buisness" ~ "business",
+                           lemma == "apnoea" ~ "apnea",
+                           lemma == "extrem" ~ "extreme",
+                           lemma == "exercis" ~ "exercise",
+                           lemma == "roomate" ~ "roommate",
+                           lemma == "plattform"~ "platform",
+                           lemma == "fbook" ~ "facebook",
+                           lemma == "gambl" ~ "gambling",
+                           lemma == "addiciton" ~ "addiction",
+                           lemma == "adhders" ~ "adhder",
+                           lemma == "heroe" ~ "hero",
+                           lemma == "therapie" ~ "therapy",
+                           lemma == "tought" ~ "thought",
+                           lemma == "algorythm" ~ "algorithm",
+                           lemma == "sorto" ~ "sorta",
+                           lemma == "redditcom" ~ "reddit",
+                           lemma == "succe" ~ "success",
+                           lemma == "somthing" ~ "something",
+                           lemma == "replie" ~ "reply",
+                           lemma == "ahaha" ~ "haha",
+                           lemma == "anythe" ~ "anything",
+                           lemma == "abilitie" ~ "ability",
+                           lemma == "legos" ~ "lego",
+                           lemma == "lineageo" ~ "lineageos",
+                           lemma == "energie" ~ "energy",
+                           lemma == "docu" ~ "documentary",
+                           lemma == "escapeism" ~ "escapism",
+                           lemma == "fuckin" ~ "fucking",
+                           lemma == "keepin" ~ "keeping",
+                           lemma == "internett" ~ "internet",
+                           lemma == "disabl" ~ "disabling",
+                           lemma == "villag" ~ "village",
+                           lemma == "fram" ~ "frame",
+                           lemma == "agenday" ~ "agenda",
+                           lemma == "leagu" ~ "league",
+                           lemma == "doco" ~ "documentary",
+                           lemma == "subbreddit" ~ "subreddit",
+                           lemma == "commentor" ~ "commenter",
+                           lemma == "recommandation" ~ "recommendation",
+                           lemma == "onlyfan" ~ "onlyfans",
+                           lemma == "rewarde" ~ "rewarding",
+                           lemma == "dissapear" ~ "disapear",
+                           lemma == "qualitie" ~ "quality",
+                           lemma == "bllablabla" ~ "blabla",
+                           lemma == "adress" ~ "address",
+                           lemma == "successe" ~ "success",
+                           lemma == "dilema" ~ "dilemma",
+                           lemma == "begining" ~ "beginning",
+                           lemma == "excusis" ~ "excuse",
+                           lemma == "autoo" ~ "auto",
+                           lemma == "maco" ~ "macos",
+                           lemma == "exemple" ~ "example",
+                           lemma == "batterie" ~ "battery",
+                           lemma == "geniuse" ~ "genius",
+                           lemma == "amout" ~ "amount",
+                           lemma == "starbuck" ~ "starbucks",
+                           lemma == "sensis" ~ "sense",
+                           lemma == "buzze" ~ "buzzer",
+                           lemma == "disciplin" ~ "discipline",
+                           lemma == "diive" ~ "dive",
+                           lemma == "deactivat" ~ "deactivate",
+                           lemma == "lichess" ~ "lichessorg",
+                           lemma == "monopolie" ~ "monopoly",
+                           lemma == "fike" ~ "fuck",
+                           lemma == "morne" ~ "morning",
+                           lemma == "everythe" ~ "everything",
+                           lemma == "andoid" ~ "android",
+                           lemma == "redditors" ~ "redditor",
+                           lemma == "accesibility" ~ "ccessibility",
+                           lemma == "broswer" ~ "browser",
+                           lemma == "improvment" ~ "improvement",
+                           lemma == "enviroment" ~ "environment",
+                           lemma == "novetely" ~ "novelty",
+                           lemma == "summarie" ~ "summary",
+                           lemma == "judgament" ~ "judgement",
+                           lemma == "cahallenge" ~ "challenge",
+                           lemma == "incentife" ~ "incentives",
+                           lemma == "challange" ~ "challenge",
+                           lemma == "collegue" ~ "colleague",
+                           lemma == "taht" ~ "that",
+                           lemma == "bullsh" ~ "bullshit",
+                           lemma == "responsability" ~ "responsibility",
+                           lemma == "purposis" ~ "purpose",
+                           lemma == "youtube™" ~ "youtube",
+                           lemma == "jernks" ~ "jerk",
+                           lemma == "drawe" ~ "drawing",
+                           lemma == "algorhythm" ~ "algorithm",
+                           lemma == "medicat" ~ "medication",
+                           lemma == "useage" ~ "usage",
+                           lemma == "backround" ~ "background",
+                           lemma == "peple" ~ "people",
+                           lemma == "controll" ~ "control",
+                           lemma == "anonimity" ~ "anonymity",
+                           lemma == "tiktoc" ~ "tiktok",
+                           lemma == "strengt" ~ "strength",
+                           lemma == "fing" ~ "fucking",
+                           lemma == "actresse" ~ "actress",
+                           lemma == "extraversion" ~ "extroversion",
+                           lemma == "fiancee" ~ "fiancé",
+                           lemma == "churche" ~ "church",
+                           lemma == "coment" ~ "comment",
+                           lemma == "categorie" ~ "category",
+                           lemma == "downvot" ~ "downvote",
+                           lemma == "coffe" ~ "coffee",
+                           lemma == "intetnet" ~ "internet",
+                           lemma == "goverment" ~ "government",
+                           lemma == "hadeve" ~ "dev",
+                           lemma == "messag" ~ "message",
+                           lemma == "colou" ~ "colour",
+                           lemma == "enemie" ~ "enemy",
+                           lemma == "tictok" ~ "tiktok",
+                           lemma == "frienship" ~ "friendship",
+                           lemma == "instagrams" ~ "instagram",
+                           lemma == "engineere" ~ "engineering",
+                           lemma == "fiance" ~ "fiancé",
+                           lemma == "pintrest" ~ "pinterest",
+                           lemma == "boredome" ~ "boredom",
+                           lemma == "masse" ~ "mass",
+                           lemma == "tictoc" ~ "tiktok",
+                           lemma == "beggining" ~ "beginning",
+                           lemma == "thirtie" ~ "thirty",
+                           lemma == "breato" ~ "breathe",
+                           lemma == "porpuse" ~ "purpose",
+                           lemma == "suscription" ~ "subscription",
+                           lemma == "samsng" ~ "samsung",
+                           lemma == "sinnks" ~ "sink",
+                           lemma == "crippl" ~ "crippling",
+                           lemma == "meane" ~ "meaning",
+                           lemma == "scarve" ~ "scarf",
+                           lemma == "algoritms" ~ "algorithm",
+                           lemma == "quarentine" ~ "quarantine",
+                           lemma == "recurr" ~ "recurring",
+                           lemma == "transurfing" ~ "trainsurfing",
+                           lemma == "lunche" ~ "lunch",
+                           lemma == "infomation" ~ "information",
+                           lemma == "servix" ~ "service",
+                           lemma == "activie" ~ "activity",
+                           lemma == "dicipline" ~ "discipline",
+                           lemma == "indion" ~ "india",
+                           lemma == "ussage" ~ "usage",
+                           lemma == "conveience" ~ "convenience",
+                           lemma == "failur" ~ "failure",
+                           lemma == "consoom" ~ "consume",
+                           lemma == "harrassment" ~ "harassment",
+                           lemma == "companie" ~ "company",
+                           lemma == "acount" ~ "account",
+                           lemma == "accomodation" ~ "accommodation",
+                           lemma == "samsing" ~ "samsung",
+                           lemma == "defens" ~ "defence",
+                           lemma == "labtop" ~ "laptop",
+                           lemma == "medecine" ~ "medicine",
+                           lemma == "expirence" ~ "experience",
+                           lemma == "economie" ~ "economy",
+                           lemma == "armie" ~ "army",
+                           lemma == "descriptioin" ~ "description",
+                           lemma == "fiancée" ~ "fiancé",
+                           lemma == "extencion" ~ "extension",
+                           lemma == "familie" ~ "family",
+                           lemma == "habbits" ~ "habit",
+                           lemma == "facebookcom" ~ "facebook",
+                           lemma == "differnet" ~ "different",
+                           lemma == "feeing" ~ "feeling",
+                           lemma == "todue" ~ "todo",
+                           lemma == "dilemna" ~ "dilemma",
+                           lemma == "suffe" ~ "suffer",
+                           lemma == "advertisment" ~ "advertisement",
+                           lemma == "fiddl" ~ "fiddling",
+                           lemma == "controlle" ~ "controlling",
+                           lemma == "ladie" ~ "lady",
+                           lemma == "exercice" ~ "exercise",
+                           lemma == "differents" ~ "difference",
+                           lemma == "stickk" ~ "stick",
+                           lemma == "excersize" ~ "exercise",
+                           lemma == "dependancy" ~ "dependency",
+                           lemma == "cbout" ~ "cbt",
+                           lemma == "fcking" ~ "fucking",
+                           lemma == "reddits" ~ "reddit",
+                           lemma == "grounde" ~ "grounded",
+                           lemma == "guill" ~ "guilt",
+                           lemma == "imbd" ~ "imdb",
+                           lemma == "intrest" ~ "interest",
+                           lemma == "laucher" ~ "launcher",
+                           lemma == "thaught" ~ "thought",
+                           lemma == "tipp" ~ "tips",
+                           lemma == "millenia" ~ "millennia",
+                           lemma == "childrens" ~ "children",
+                           lemma == "libary" ~ "library",
+                           lemma == "lense" ~ "lens",
+                           lemma == "ideia" ~ "idea",
+                           lemma == "mintue" ~ "minute",
+                           lemma == "beate" ~ "beating",
+                           lemma == "lfie" ~ "life",
+                           lemma == "feele" ~ "feeling",
+                           lemma == "rythm" ~ "rhythm",
+                           lemma == "mastrubation" ~ "masturbation",
+                           lemma == "precense" ~ "presence",
+                           lemma == "conciousness" ~ "consciousness",
+                           lemma == "treatament" ~ "treatment",
+                           lemma == "behaviwe" ~ "behaviour",
+                           lemma == "faste" ~ "fasting",
+                           lemma == "occassion" ~ "occasion",
+                           lemma == "languagge" ~ "language",
+                           lemma == "peope" ~ "people",
+                           lemma == "subredit" ~ "subreddit",
+                           lemma == "recycl" ~ "recyle",
+                           lemma == "mathematic" ~ "mathematics",
+                           lemma == "homepag" ~ "homepage",
+                           lemma == "jobb" ~ "job",
+                           lemma == "milion" ~ "million",
+                           lemma == "libertie" ~ "liberty",
+                           lemma == "masturbat" ~ "masturbate",
+                           lemma == "hopp" ~ "hopping",
+                           lemma == "messager" ~ "messenger",
+                           lemma == "incrase" ~ "increase",
+                           lemma == "interenet" ~ "internet",
+                           lemma == "instantgram" ~ "instagram",
+                           lemma == "nappe" ~ "nappies",
+                           lemma == "instgram" ~ "instagram",
+                           lemma == "revolut" ~ "revolution",
+                           lemma == "propoganda" ~ "propaganda",
+                           lemma == "importa" ~ "important",
+                           lemma == "teoch" ~ "thought",
+                           lemma == "lenght" ~ "length",
+                           lemma == "pseudue" ~ "pseudo",
+                           lemma == "psuedo" ~ "pseudo",
+                           lemma == "futur" ~ "future",
+                           lemma == "communite" ~ "community",
+                           lemma == "ourselve" ~ "ourselves",
+                           lemma == "negatife" ~ "negative",
+                           lemma == "pomodoros" ~ "pomodoro",
+                           lemma == "lande" ~ "landing",
+                           lemma == "recipy" ~ "recipe",
+                           lemma == "ressource" ~ "resource",
+                           lemma == "responde" ~ "responding",
+                           lemma == "redit" ~ "reddit",
+                           lemma == "opnion" ~ "opinion",
+                           lemma == "porng" ~ "porn",
+                           lemma == "seratonin" ~ "serotonin",
+                           lemma == "refrence" ~ "reference",
+                           lemma == "resistiance" ~ "resistance",
+                           lemma == "oinf" ~ "information",
+                           lemma == "riche" ~ "rich",
+                           lemma == "serie" ~ "series",
+                           lemma == "sery" ~ "series",
+                           lemma == "opiod" ~ "opioid",
+                           lemma == "somethe" ~ "something",
+                           lemma == "sofware" ~ "software",
+                           lemma == "smarthphone" ~ "smartphone",
+                           lemma == "pioner" ~ "pioneer",
+                           lemma == "plataform" ~ "platform",
+                           lemma == "smarthone" ~ "smartphone",
+                           lemma == "comunity" ~ "community",
+                           lemma == "yaho" ~ "yahoo",
+                           lemma == "nameake" ~ "namesake",
+                           lemma == "sympton" ~ "symptom",
+                           lemma == "intead" ~ "instead",
+                           lemma == "landscap" ~ "landscape",
+                           lemma == "circuse" ~ "circus",
+                           lemma == "knowlege" ~ "knowledge",
+                           lemma == "hypocrit" ~ "hypocrite",
+                           lemma == "tracke" ~ "tracker",
+                           lemma == "upvot" ~ "upvote",
+                           lemma == "selfs" ~ "self",
+                           lemma == "softwar" ~ "software",
+                           lemma == "subreedit" ~ "subreddit",
+                           lemma == "stuf" ~ "stuff",
+                           lemma == "socia" ~ "social",
+                           lemma == "somone" ~ "someone",
+                           lemma == "sence" ~ "sense",
+                           lemma == "techology" ~ "technology",
+                           lemma == "usefull" ~ "useful",
+                           lemma == "youtubecom" ~ "youtube",
+                           lemma == "canaday" ~ "canada",
+                           lemma == "obession" ~ "obsession",
+                           lemma == "soemthing" ~ "something",
+                           lemma == "dopaminedetoxing" ~ "dopaminedetox",
+                           lemma == "strenght" ~ "strength",
+                           lemma == "trende" ~ "trending",
+                           lemma == "simptom" ~ "symptom",
+                           lemma == "messanger" ~ "messenger",
+                           lemma == "vidoe" ~ "video",
+                           lemma == "whatapp" ~ "whatsapp",
+                           lemma == "whatsaap" ~ "whatsapp",
+                           lemma == "whatsap" ~ "whatsapp",
+                           lemma == "widle" ~ "wilde",
+                           lemma == "wrestl" ~ "wrestling",
+                           lemma == "poeple" ~ "people",
+                           lemma == "smarphone" ~ "smartphone",
+                           lemma == "journall" ~ "journal",
+                           lemma == "nothe" ~ "nothing",
+                           TRUE ~ lemma)) %>% 
+  filter(!str_detect(lemma, "informedness")) %>% 
+  filter(!str_detect(lemma, "breakingnew")) %>% 
+  filter(!str_detect(lemma, "nbsp")) %>% 
+  filter(!str_detect(lemma, "because")) %>% #not a noun
+  filter(!str_detect(lemma, "atleast")) %>% 
+  filter(!str_detect(lemma, "vion")) %>% 
+  filter(!str_detect(lemma, "thst")) %>% 
+  filter(!str_detect(lemma, "yess")) %>% 
+  filter(!str_detect(lemma, "vvay")) %>% 
+  filter(!str_detect(lemma, "solive")) %>% 
+  filter(!str_detect(lemma, "etcetera")) %>% 
+  filter(!str_detect(lemma, "redirecturl")) %>% 
+  filter(!str_detect(lemma, "losts")) %>% 
+  filter(!str_detect(lemma, "https")) %>% 
+  filter(!str_detect(lemma, "iftt")) %>% 
+  filter(!str_detect(lemma, "mucj"))
+
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = ifelse(str_detect(lemma, "haha"), "haha", lemma))
+
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = ifelse(str_detect(lemma, "hehe"), "hehe", lemma))
+
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = ifelse(str_detect(lemma, "blabla"), "blabla", lemma))
+
+data_tokenised <- data_tokenised %>% 
+  mutate(lemma = ifelse(str_detect(lemma, "zuck"), "zuckerberg", lemma))
+```
+
+Remove and identify non-English lemmas
+
+Open the data tab and sort lemma alphabetically. As the end will the non-English lemmas - there are probably more to find here. Keep checking
+Remove by doc_id
+```{r}
+doc_ids_to_remove <- c("gw8rwyv", "gw54vgy", "hf7uwb4","gw54vgy", "gn1e8eg", "i86iny", 
+                       "gwx8bdh", "fni8mz1", "f65e38r", "guvksq8", "gv8q62k", "gzgcpen",
+                       "h862xkz", "q18k71", "fmrjaoy", "fmrjyor", "fmrlafs", "fmrmkla", "fmrn7pg",
+                       "isygsf", "ewpm9f3", "gg3qra4", "h2paiy3", "i94c66",
+                       "h3kkm72", "h3kkn3a", "h3kko8g", "h3kkpg3")
+
+data_tokenised <- data_tokenised %>% 
+  filter(!doc_id %in% doc_ids_to_remove)
+
+rm(doc_ids_to_remove)
+```
+
+Check for English language words 
+(not all non-English words should be removed though) You'll need to make a judgement call on this
+
+First produce a vector of known English language words
+```{r}
+words.dir <- "scowl-2020.12.07/final/"
+words <- unlist(sapply(list.files(words.dir, pattern='[1-6][05]$', full.names=TRUE), readLines, USE.NAMES=FALSE))
+words <- c(words, readLines(paste0(words.dir, '../r/special/frequent')))
+
+words <- as.data.frame(words)
+
+words <- words %>% 
+  mutate(words = iconv(words, to ="utf8"),
+         text = tolower(words))
+```
+
+```{r}
+non_english_valid_words <- data_tokenised %>% 
+  filter(! (lemma %in% words$text)) %>% 
+  group_by(lemma) %>% 
+  tally() %>% 
+  arrange(desc(n)) %>% 
+  filter(n > 2) %>% 
+  select(lemma)
+```
+
+essentially must be 1) english word and 2) for non-english words must appear at least 3 times
+
+```{r}
+words_not_included <- data_tokenised %>% 
+  filter(! (lemma %in% words$text | lemma %in% non_english_valid_words$lemma))
+
+# all of the above terms are 1) not english words and 2) appear either once or twice in the entire dataset.
+
+data_tokenised <- data_tokenised %>% 
+  filter(lemma %in% words$text | lemma %in% non_english_valid_words$lemma)
+```
+
+```{r}
+data_tokenised
+```
+
+# Export for topic modelling
+
+```{r}
+write.csv(data_tokenised, "data_clean/data_filtered_annotated_for_topic_modelling.csv")
+```
+
+
+
