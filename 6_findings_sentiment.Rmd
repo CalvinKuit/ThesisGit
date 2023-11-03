@@ -339,6 +339,7 @@ Subjectively observing those with the highest difference in scores (outliers). W
 
 # everything from here 
 
+#albert srtategies
 ```{r}
 library(dplyr)
 library(ggplot2)
