@@ -344,6 +344,137 @@ library(dplyr)
 library(ggplot2)
 
 # List of words
+strategy_unigrams <- c("strategy", "solution", "approach", "way", "support", "programs", "practice", "method", "seeking", "disconnection", "techniques", "tactics", "blueprint", "roadmap", "framework", "model")
+strategy_bigrams <- c("approach way", "disconnection programs", "solution approach", "seeking support", "practice method", "way practice", "strategy solution", "best practices", "action plan", "contingency plan", "proven method", "game plan")
+
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(compound, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in platform_unigrams
+vader_sentiments <- bind_rows(lapply(strategy_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot5 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "VADER Sentiment scores for platform unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot5)
+ggsave("images/sentiment_plat.png", plot5)
+
+
+```
+
+```{r}
+
+# Function to filter rows containing specific words and calculate average sentiment using VADER
+get_avg_vader <- function(word, data){
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word)) %>%
+    summarise(avg_vader = mean(ave_sentiment, na.rm = TRUE))
+  
+  return(data.frame(word = word, avg_vader = filtered_data$avg_vader))
+}
+
+# Use the function to get average VADER sentiments for each word in platform_unigrams
+vader_sentiments <- bind_rows(lapply(strategy_unigrams, get_avg_vader, data = data))
+
+vader_sentiments
+
+# Visualize
+# Visualize with bars sorted from high to low based on avg_vader
+plot6 <- ggplot(vader_sentiments, aes(x = reorder(word, avg_vader), y = avg_vader, fill = avg_vader)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "VADER Sentiment scores for strategy unigrams",
+       y = "Average Sentiment Score") +
+  scale_fill_gradient(low = "red", high = "blue", name = "Sentiment")
+
+print(plot6)
+ggsave("images/sentimentr_sen.png", plot6)
+
+
+```
+
+
+density function
+
+```{r}
+# Function to extract sentiment scores associated with each word
+# Function to extract sentiment scores associated with each word
+get_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in platform_unigrams
+vader_scores <- bind_rows(lapply(strategy_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_by_word <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +  # Remove legend due to potentially many words
+  facet_wrap(~ word, scales = "free_y") +  # Separate density plot for each word
+  labs(title = "Density plot of VADER scores for strategy unigrams",
+       x = "Score",
+       y = "Density")
+
+print(plot4)
+ggsave("images/density_com.png", density_by_word)
+
+print(density_by_word)
+ggsave("images/density_com.png", density_by_word)
+
+```
+
+```{r}
+get_vader_scores <- function(word, data) {
+  filtered_data <- data %>%
+    filter(str_detect(str_to_lower(body), word))
+  
+  return(data.frame(word = word, compound = filtered_data$compound))
+}
+
+# Use the function to get VADER sentiments for each word in platform_unigrams
+vader_scores <- bind_rows(lapply(strategy_unigrams, get_vader_scores, data = data))
+
+# Density plot visualization
+density_plot <- vader_scores %>%
+  ggplot(aes(x = compound, fill = word)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Density plot of VADER scores for strategy unigrams",
+       x = "Score",
+       y = "Density") +
+  theme(legend.position = "right")  # Adjust legend position if needed
+
+# Print the plot
+print(density_plot)
+
+ggsave("images/density_plot_vader_scores.png", density_plot)
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# List of words
 platform_unigrams <- c("technology", "device", "smartphone", "online", "gadget", "handset", "network", "electronic", "machine", "apparatus", "tech", "platform", "phone", "machinery", "app", "cell", "mobile", "community", "digital", "application", "media", "service", "web", "browser", "operating system", "streaming", "e-commerce", "search engine", "virtual reality", "augmented reality", "cloud", "gaming", "podcasts","television", "tv", "notifications", "smartwatch")
 
 # Function to filter rows containing specific words and calculate average sentiment using VADER
